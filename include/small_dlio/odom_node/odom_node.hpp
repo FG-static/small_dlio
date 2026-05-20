@@ -34,16 +34,23 @@ namespace small_dlio {
             pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_submap
         ) const;
 
-        bool keyframeDetection(
-            const Eigen::Matrix4d &trans_gicp
-        );
-
         bool scanToMap(
             const pcl::PointCloud<pcl::PointXYZ>::Ptr &source_cloud,
             const pcl::PointCloud<pcl::PointXYZ>::Ptr &target_cloud,
             Eigen::Matrix4d &trans_gicp,
             double &alignment_score
         ) const;
+
+        bool geometricFuser(
+            const State &imu_state,
+            const Pose &gicp_pose,
+            const double dt,
+            State &fused_state
+        ) const;
+
+        bool keyframeDetection(
+            const Eigen::Matrix4d &trans_gicp
+        );
 
         bool integrateImu(
             State &state_end,
@@ -55,6 +62,13 @@ namespace small_dlio {
         int knn_limit_ = 5;
         double max_distance_ = 20.0;
         double gicp_leaf_size_ = 0.10;
+
+        double Kp_ = 4.5;
+        double Kq_ = 4.0;
+        double Kv_ = 11.25;
+        double Ka_ = 2.25;
+        double Kg_ = 1.0;
+        double b_max_ = 1.0;
     };
 
 }; // small_dlio

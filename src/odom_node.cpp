@@ -137,4 +137,47 @@ namespace small_dlio {
         }
         return true;
     }
+
+    bool OdomNode::geometricFuser(
+        const State &imu_state,
+        const Pose &gicp_pose,
+        const double dt,
+        State &fused_state
+    ) const {
+
+        if (dt <= 0.0 || !std::isfinite(dt) ||
+            !imu_state.pose.p.allFinite() || !gicp_pose.p.allFinite() ||
+            !imu_state.pose.q.coeffs().allFinite() || !gicp_pose.q.coeffs().allFinite()) {
+                
+            fused_state = imu_state;
+            return false;
+        }
+
+        const Eigen::Quaterniond q_hat = imu_state.pose.q.normalized();
+        const Eigen::Quaterniond q_in = gicp_pose.q.normalized();
+
+        const Eigen::Vector3d e_p = gicp_pose.p - imu_state.pose.p;
+        const Eigen::Vector3d e_p_body = q_hat.conjugate() * e_p;
+
+        const Eigen::Quaterniond q_e = (q_hat.conjugate() * q_in).normalized();
+        const double q_e_sign = q_e.w() >= 0.0 ? 1.0 : -1.0;
+        const Eigen::Quaterniond q_delta(
+            1.0 - std::abs(q_e.w()),
+            q_e_sign * q_e.x(),
+            q_e_sign * q_e.y(),
+            q_e_sign * q_e.z());
+        const Eigen::Quaterniond q_corr = q_hat * q_delta;
+
+        fused_state = imu_state;
+        fused_state.b_a = imu_state.b_a - dt * Ka_ * e_p_body;
+        fused_state.b_g = imu_state.b_g - dt * Kg_ * Eigen::Vector3d(q_e.x(), q_e.y(), q_e.z());
+        fused_state.b_a = fused_state.b_a.cwiseMax(-b_max_).cwiseMin(b_max_);
+        fused_state.b_g = fused_state.b_g.cwiseMax(-b_max_).cwiseMin(b_max_);
+        fused_state.pose.p = imu_state.pose.p + dt * Kp_ * e_p;
+        fused_state.v = imu_state.v + dt * Kv_ * e_p;
+        fused_state.pose.q.coeffs() = q_hat.coeffs() + dt * Kq_ * q_corr.coeffs();
+        fused_state.pose.q.normalize();
+
+        return true;
+    }
 } // small_dlio
