@@ -180,4 +180,47 @@ namespace small_dlio {
 
         return true;
     }
+
+    bool OdomNode::keyframeDetection(
+        const State &fused_state,
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_world,
+        const double alignment_score
+    ) {
+
+        constexpr double kf_trans_thresh = 0.5;
+        constexpr double kf_rot_thresh = 10.0 * M_PI / 180.0;
+        constexpr double max_alignment_score = 1.0;
+
+        if (!cloud_world || cloud_world->empty() ||
+            !std::isfinite(alignment_score) ||
+            alignment_score > max_alignment_score ||
+            !fused_state.pose.p.allFinite() ||
+            !fused_state.pose.q.coeffs().allFinite()) 
+            return false;
+
+        KeyFrame kf;
+        kf.pose = fused_state.pose;
+        kf.pose.q.normalize();
+        kf.cloud.reset(new pcl::PointCloud<pcl::PointXYZ>(*cloud_world));
+
+        if (keyframes_.empty()) {
+
+            keyframes_.push_back(keyframe);
+            return true;
+        }
+
+        const KeyFrame &last_kf = keyframes_.back();
+        const double trans = (fused_state.pose.p - last_kf.pose.p).norm();
+
+        Eigen::Quaterniond dq =
+            (last_kf.pose.q.conjugate() * kf.pose.q).normalized();
+        if (dq.w() < 0.0) dq.coeffs() *= -1.0;
+        const double rot = Eigen::AngleAxisd(dq).angle();
+
+        if (trans < kf_trans_thresh && rot < kf_rot_thresh)
+            return false;
+
+        keyframes_.push_back(kf);
+        return true;
+    }
 } // small_dlio

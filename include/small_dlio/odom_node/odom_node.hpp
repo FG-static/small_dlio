@@ -49,7 +49,9 @@ namespace small_dlio {
         ) const;
 
         bool keyframeDetection(
-            const Eigen::Matrix4d &trans_gicp
+            const State &fused_state,
+            const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_world,
+            const double alignment_score
         );
 
         bool integrateImu(
@@ -58,6 +60,7 @@ namespace small_dlio {
         );
 
         std::deque<ImuMeas> imu_data_;
+        std::vector<KeyFrame> keyframes_;
 
         int knn_limit_ = 5;
         double max_distance_ = 20.0;
