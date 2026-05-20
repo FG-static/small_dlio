@@ -141,7 +141,7 @@ namespace small_dlio {
     bool OdomNode::geometricFuser(
         const State &imu_state,
         const Pose &gicp_pose,
-        const double dt,
+        const double &dt,
         State &fused_state
     ) const {
 
@@ -187,13 +187,9 @@ namespace small_dlio {
         const double alignment_score
     ) {
 
-        constexpr double kf_trans_thresh = 0.5;
-        constexpr double kf_rot_thresh = 10.0 * M_PI / 180.0;
-        constexpr double max_alignment_score = 1.0;
-
         if (!cloud_world || cloud_world->empty() ||
             !std::isfinite(alignment_score) ||
-            alignment_score > max_alignment_score ||
+            alignment_score > max_alignment_score_ ||
             !fused_state.pose.p.allFinite() ||
             !fused_state.pose.q.coeffs().allFinite()) 
             return false;
@@ -205,7 +201,7 @@ namespace small_dlio {
 
         if (keyframes_.empty()) {
 
-            keyframes_.push_back(keyframe);
+            keyframes_.push_back(kf);
             return true;
         }
 
@@ -217,10 +213,94 @@ namespace small_dlio {
         if (dq.w() < 0.0) dq.coeffs() *= -1.0;
         const double rot = Eigen::AngleAxisd(dq).angle();
 
-        if (trans < kf_trans_thresh && rot < kf_rot_thresh)
+        if (trans < kf_trans_thresh_ && rot < kf_rot_thresh_)
             return false;
 
         keyframes_.push_back(kf);
+        return true;
+    }
+
+    bool OdomNode::statePropagation(
+        const ImuMeas &imu,
+        const double &dt
+    ) {
+
+        return integrateStep(state_, imu, dt);
+    }
+
+    bool OdomNode::integrateStep(
+        State &state,
+        const ImuMeas &imu,
+        const double &dt
+    ) const {
+
+        if (dt <= 0.0 || !std::isfinite(dt) ||
+            !imu.gyro.allFinite() || !imu.acc.allFinite() ||
+            !state.pose.p.allFinite() || !state.pose.q.coeffs().allFinite() ||
+            !state.v.allFinite() || !state.b_a.allFinite() || !state.b_g.allFinite())
+            return false;
+
+        const Eigen::Quaterniond q = state.pose.q.normalized();
+        const Eigen::Vector3d clean_gyro = imu.gyro - state.b_g;
+        const Eigen::Vector3d clean_acc = imu.acc - state.b_a;
+
+        const Eigen::Vector3d world_gyro = q * clean_gyro;
+        const Eigen::Vector3d world_acc = q * clean_acc - gravity_;
+        (void)world_gyro;  // TODO: 后期看是否删除
+
+        state.pose.p += state.v * dt + 0.5 * world_acc * dt * dt;
+        state.v += world_acc * dt;
+
+        const Eigen::Quaterniond omega_body(
+            0.0,
+            clean_gyro.x(),
+            clean_gyro.y(),
+            clean_gyro.z());
+        state.pose.q.coeffs() =
+            q.coeffs() + 0.5 * dt * (q * omega_body).coeffs();
+        state.pose.q.normalize();
+
+        return state.pose.p.allFinite() &&
+            state.v.allFinite() &&
+            state.pose.q.coeffs().allFinite();
+    }
+
+    bool OdomNode::integrateImu(
+        State &state_end,
+        const double &t_point
+    ) {
+
+        if (!std::isfinite(t_point) || imu_data_.empty())
+            return false;
+
+        std::sort(
+            imu_data_.begin(), imu_data_.end(),
+            [](const ImuMeas &a, const ImuMeas &b) {
+                return a.stamp_ns < b.stamp_ns;
+            });
+
+        while (imu_data_.size() >= 2 && imu_data_[1].stamp_ns <= t_point) {
+
+            const ImuMeas &imu = imu_data_[0];
+            const double dt = imu_data_[1].stamp_ns - imu_data_[0].stamp_ns;
+            if (!integrateStep(state_end, imu, dt))
+                return false;
+
+            imu_data_.pop_front();
+        }
+
+        if (imu_data_.empty())
+            return true;
+
+        // handle the special point which between the 2 imu frames
+        const double dt = t_point - imu_data_.front().stamp_ns;
+        if (dt <= 0.0)
+            return true;
+
+        if (!integrateStep(state_end, imu_data_.front(), dt))
+            return false;
+
+        imu_data_.front().stamp_ns = t_point;
         return true;
     }
 } // small_dlio

@@ -17,6 +17,7 @@
 #include <deque>
 #include <vector>
 #include <cmath>
+#include <algorithm>
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "sensor_msgs/msg/point_field.hpp"
 

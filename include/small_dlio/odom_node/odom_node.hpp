@@ -44,7 +44,7 @@ namespace small_dlio {
         bool geometricFuser(
             const State &imu_state,
             const Pose &gicp_pose,
-            const double dt,
+            const double &dt,
             State &fused_state
         ) const;
 
@@ -54,10 +54,23 @@ namespace small_dlio {
             const double alignment_score
         );
 
+        bool statePropagation(
+            const ImuMeas &imu,
+            const double &dt
+        );
+
+        bool integrateStep(
+            State &state,
+            const ImuMeas &imu,
+            const double &dt
+        ) const;
+
         bool integrateImu(
             State &state_end,
             const double &t_point
         );
+
+        State state_;
 
         std::deque<ImuMeas> imu_data_;
         std::vector<KeyFrame> keyframes_;
@@ -71,7 +84,13 @@ namespace small_dlio {
         double Kv_ = 11.25;
         double Ka_ = 2.25;
         double Kg_ = 1.0;
-        double b_max_ = 1.0;
+        double b_max_ = 1.0; // TODO: 后期上下限单独分开
+
+        double kf_trans_thresh_ = 0.5;
+        double kf_rot_thresh_ = 10.0 * M_PI / 180.0;
+        double max_alignment_score_ = 1.0;
+
+        Eigen::Vector3d gravity_ = {0, 0, 9.8};
     };
 
 }; // small_dlio
