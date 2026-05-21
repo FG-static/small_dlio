@@ -44,7 +44,7 @@ namespace small_dlio {
 
     struct ImuMeas {
 
-        double stamp_ns;
+        double stamp;
         double dt;
         Eigen::Vector3d gyro;
         Eigen::Vector3d acc;

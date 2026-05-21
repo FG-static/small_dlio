@@ -1,4 +1,10 @@
 #include "odom_node/odom_node.hpp"
+#include "Eigen/src/Core/Matrix.h"
+#include "Eigen/src/Geometry/Quaternion.h"
+#include "pcl/impl/point_types.hpp"
+#include "pcl/point_cloud.h"
+#include "sensor_msgs/msg/point_cloud2.hpp"
+#include <memory>
 
 namespace small_dlio {
 
@@ -28,25 +34,25 @@ namespace small_dlio {
                 imu_opt
             );
         sub_cloud_ =
-            create_subscription<sensor_msgs::msg::PointCloud2>(
-                "cloud", 10,
-                [this](sensor_msgs::msg::PointCloud2::SharedPtr &msg) {
+            create_subscription<livox_ros_driver2::msg::CustomMsg>(
+                "/livox/lidar", 10,
+                [this](livox_ros_driver2::msg::CustomMsg::SharedPtr &msg) {
                  
-                    callbackCloud(msg);
+                    callbackLivoxCloud(msg);
                 },
                 cloud_opt
             );
         
         pub_odom_ = 
-            create_publsher<nav_msgs::msg::Odometry>(
+            create_publisher<nav_msgs::msg::Odometry>(
                 "odom", 10
             );
         pub_path_ = 
-            create_publsher<nav_msgs::msg::Path>(
+            create_publisher<nav_msgs::msg::Path>(
                 "path", 10
             );
         pub_pose_ = 
-            create_publsher<geometry_msgs::msg::PoseStamped>(
+            create_publisher<geometry_msgs::msg::PoseStamped>(
                 "pose", 10
             );
     }
@@ -188,7 +194,7 @@ namespace small_dlio {
             trans_gicp = Eigen::Matrix4d::Identity();
             RCLCPP_WARN_THROTTLE(
                 this->get_logger(), *this->get_clock(), 1000,
-                "GICP 配准存在非法，跳过本帧");
+                "GICP 配准存在非法结果，跳过本帧");
             return false;
         }
         return true;
@@ -332,13 +338,13 @@ namespace small_dlio {
         std::sort(
             imu_data_.begin(), imu_data_.end(),
             [](const ImuMeas &a, const ImuMeas &b) {
-                return a.stamp_ns < b.stamp_ns;
+                return a.stamp < b.stamp;
             });
 
-        while (imu_data_.size() >= 2 && imu_data_[1].stamp_ns <= t_point) {
+        while (imu_data_.size() >= 2 && imu_data_[1].stamp <= t_point) {
 
             const ImuMeas &imu = imu_data_[0];
-            const double dt = imu_data_[1].stamp_ns - imu_data_[0].stamp_ns;
+            const double dt = imu_data_[1].stamp - imu_data_[0].stamp;
             if (!integrateStep(state_end, imu, dt))
                 return false;
 
@@ -349,14 +355,14 @@ namespace small_dlio {
             return true;
 
         // handle the special point which between the 2 imu frames
-        const double dt = t_point - imu_data_.front().stamp_ns;
+        const double dt = t_point - imu_data_.front().stamp;
         if (dt <= 0.0)
             return true;
 
         if (!integrateStep(state_end, imu_data_.front(), dt))
             return false;
 
-        imu_data_.front().stamp_ns = t_point;
+        imu_data_.front().stamp = t_point;
         return true;
     }
 
@@ -367,8 +373,8 @@ namespace small_dlio {
         std::lock_guard<std::mutex> lock(mtx_);
 
         double stamp = 
-            msg->header.stamp.seconds() +
-            msg->header.stamp.nanoseconds() * 1e-9;
+            msg->header.stamp.sec +
+            msg->header.stamp.nanosec * 1e-9;
         
         double dt = stamp - prev_imu_stamp_;
         if (prev_imu_stamp_ == 0.0) {
@@ -380,8 +386,8 @@ namespace small_dlio {
         
         ImuMeas imu;
         imu.dt = dt;
-        imu.stamp_ns = msg->header.stamp.seconds() +
-            msg->header.stamp.nanoseconds() * 1e-9;
+        imu.stamp = msg->header.stamp.sec +
+            msg->header.stamp.nanosec * 1e-9;
         imu.acc = Eigen::Vector3d(
             msg->linear_acceleration.x, 
             msg->linear_acceleration.y, 
@@ -396,11 +402,69 @@ namespace small_dlio {
         statePropagation(imu, dt);
     }
 
-    void OdomNode::callbackPointCloud(
-        const sensor_msgs::msg::PointCloud2::SharedPtr &msg
+    void OdomNode::callbackLivoxCloud(
+        const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg
     ) {
 
         std::lock_guard<std::mutex> lock(mtx_);
+        auto cloud = std::make_shared<pcl::PointCloud<PointXYZIT>>();
+        cloud->reserve(msg->points.size());
+
+        for (const auto &src : msg->points) {
+
+            if (!std::isfinite(src.x) ||
+                !std::isfinite(src.y) ||
+                !std::isfinite(src.z))
+                continue;
+
+            PointXYZIT dst;
+            dst.x = src.x;
+            dst.y = src.y;
+            dst.z = src.z;
+            dst.intensity = static_cast<float>(src.reflectivity);
+            dst.offset_time = static_cast<float>(src.offset_time) * 1e-9f;
+            cloud->push_back(dst);
+        }
+
+        if (cloud->empty())
+            return;
+
+        double scan_start = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
+        double dt = scan_start - prev_scan_stamp_;
+        if (prev_scan_stamp_ == 0.0) {
+
+            prev_scan_stamp_ = scan_start;
+            return;
+        }
+        prev_scan_stamp_ = scan_start;
+
+        // deskew
+        auto cloud_deskewed = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        State imu_state;
+        motionCorrection(cloud, state_, scan_start, cloud_deskewed, imu_state);
         
+        // submapGeneration
+        auto submap = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        submapGeneration(imu_state, submap);
+
+        // gicp
+         Eigen::Matrix4d T_gicp;
+         double score;
+         if (!scanToMap(cloud_deskewed, submap, T_gicp, score)) return;
+
+         Pose gicp_pose;
+         gicp_pose.p = T_gicp.block<3, 1>(0, 0);
+         gicp_pose.q = Eigen::Quaterniond(T_gicp.block<3, 3>(0, 0));
+
+         // geometricFuser
+         State fused_state;
+         geometricFuser(imu_state, gicp_pose, dt, fused_state);
+         state_ = fused_state;
+
+         // keyframeDetection
+         keyframeDetection(fused_state, cloud_deskewed, score);
+
+         // publish
+         
     }
 } // small_dlio

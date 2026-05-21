@@ -16,17 +16,17 @@ namespace small_dlio {
         void callbackImu(
             const sensor_msgs::msg::Imu::SharedPtr &msg
         );
-        void callbackPointCloud(
-            const sensor_msgs::msg::PointCloud2::SharedPtr &msg
+        void callbackLivoxCloud(
+            const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg
         );
 
         rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr
             sub_imu_;
-        rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr
+        rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr
             sub_cloud_;
         rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr
             pub_odom_;
-        rclcpp::Publisher<geomtry_msgs::msg::PoseStamped>::SharedPtr
+        rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr
             pub_pose_;
         rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr
             pub_path_;

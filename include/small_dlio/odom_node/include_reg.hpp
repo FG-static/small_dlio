@@ -11,6 +11,7 @@
 #include "tf2_eigen/tf2_eigen.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
+#include "livox_ros_driver2/msg/custom_msg.hpp"
 
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
