@@ -14,6 +14,12 @@ namespace small_dlio {
     OdomNode::OdomNode() : Node("small_dlio_odom") {
 
         loadParams();
+        state_.pose.p.setZero();
+        state_.pose.q.setIdentity();
+        state_.v.setZero();
+        state_.b_a.setZero();
+        state_.b_g.setZero();
+        tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
         imu_cb_group_ = create_callback_group(
             rclcpp::CallbackGroupType::MutuallyExclusive
@@ -30,7 +36,7 @@ namespace small_dlio {
         sub_imu_ = 
             create_subscription<sensor_msgs::msg::Imu>(
                 "imu", 10,
-                [this](sensor_msgs::msg::Imu::SharedPtr &msg) {
+                [this](sensor_msgs::msg::Imu::SharedPtr msg) {
 
                     callbackImu(msg);
                 },
@@ -39,7 +45,7 @@ namespace small_dlio {
         sub_cloud_ =
             create_subscription<livox_ros_driver2::msg::CustomMsg>(
                 "/livox/lidar", 10,
-                [this](livox_ros_driver2::msg::CustomMsg::SharedPtr &msg) {
+                [this](livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
                  
                     callbackLivoxCloud(msg);
                 },
@@ -513,5 +519,8 @@ namespace small_dlio {
         tf.transform.rotation.y = state_.pose.q.y();
         tf.transform.rotation.z = state_.pose.q.z();
         tf_broadcaster_->sendTransform(tf);
+    }
+
+    void OdomNode::loadParams() {
     }
 } // small_dlio

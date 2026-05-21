@@ -2,8 +2,8 @@ CompileFlags:
   Compiler: /usr/bin/g++
   Add:
     - -std=gnu++17
-    - -I/home/goose/small_dlio/include
-    - -I/home/goose/small_dlio/include/small_dlio
+    - -I/home/goose/small_dlio/src/dlio/include
+    - -I/home/goose/small_dlio/src/dlio/include/small_dlio
     - -I/usr/include/eigen3
     - -I/usr/include/opencv4
     - -I/usr/include/x86_64-linux-gnu/opencv4
