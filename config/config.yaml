@@ -1,0 +1,46 @@
+/**:
+  ros__parameters:
+
+    # ========== Frame IDs ==========
+    odom_frame: "odom"
+    body_frame: "body"
+
+    # ========== Topics ==========
+    imu_topic: "/livox/imu"
+    cloud_topic: "/livox/lidar"
+
+    # ========== Extrinsics ==========
+    # body -> IMU
+    t_body_imu: [0.0, 0.0, 0.0]
+    q_body_imu: [1.0, 0.0, 0.0, 0.0]  # w, x, y, z
+
+    # body -> LiDAR
+    t_body_lidar: [0.0, 0.0, 0.0]
+    q_body_lidar: [1.0, 0.0, 0.0, 0.0]
+
+    # ========== Gravity ==========
+    gravity: [0.0, 0.0, 9.8]
+
+    # ========== Keyframe Detection ==========
+    kf_trans_thresh: 0.5        # meters
+    kf_rot_thresh: 0.1745       # radians (~10 deg)
+    max_alignment_score: 1.0
+
+    # ========== Submap (kNN) ==========
+    knn_limit: 5
+    max_distance: 20.0          # meters
+
+    # ========== GICP ==========
+    gicp_leaf_size: 0.10        # voxel filter leaf size (m)
+    gicp_num_threads: 4
+    gicp_correspondence_randomness: 20
+    gicp_max_correspondence_distance: 1.0
+
+    # ========== Geometric Observer Gains ==========
+    geo_Kp: 1.0
+    geo_Kv: 1.0
+    geo_Kq: 1.0
+    geo_Ka: 1.0
+    geo_Kg: 1.0
+    geo_b_max: 1.0
+

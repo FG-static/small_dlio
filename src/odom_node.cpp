@@ -1,6 +1,9 @@
 #include "odom_node/odom_node.hpp"
 #include "Eigen/src/Core/Matrix.h"
 #include "Eigen/src/Geometry/Quaternion.h"
+#include "geometry_msgs/msg/pose_stamped.hpp"
+#include "geometry_msgs/msg/transform_stamped.hpp"
+#include "nav_msgs/msg/odometry.hpp"
 #include "pcl/impl/point_types.hpp"
 #include "pcl/point_cloud.h"
 #include "sensor_msgs/msg/point_cloud2.hpp"
@@ -453,7 +456,7 @@ namespace small_dlio {
          if (!scanToMap(cloud_deskewed, submap, T_gicp, score)) return;
 
          Pose gicp_pose;
-         gicp_pose.p = T_gicp.block<3, 1>(0, 0);
+         gicp_pose.p = T_gicp.block<3, 1>(0, 3);
          gicp_pose.q = Eigen::Quaterniond(T_gicp.block<3, 3>(0, 0));
 
          // geometricFuser
@@ -465,6 +468,50 @@ namespace small_dlio {
          keyframeDetection(fused_state, cloud_deskewed, score);
 
          // publish
-         
+         current_stamp_ = msg->header.stamp;
+         publishOdometry();
+         publishTf();
+    }
+
+    void OdomNode::publishOdometry() {
+
+        nav_msgs::msg::Odometry odom;
+        odom.header.stamp = current_stamp_;
+        odom.header.frame_id = "odom";
+        odom.child_frame_id = "body";
+        odom.pose.pose.orientation.w = state_.pose.q.w();
+        odom.pose.pose.orientation.x = state_.pose.q.x();
+        odom.pose.pose.orientation.y = state_.pose.q.y();
+        odom.pose.pose.orientation.z = state_.pose.q.z();
+        odom.pose.pose.position.x = state_.pose.p.x();
+        odom.pose.pose.position.y = state_.pose.p.y();
+        odom.pose.pose.position.z = state_.pose.p.z();
+        odom.twist.twist.linear.x = state_.v.x();
+        odom.twist.twist.linear.y = state_.v.y();
+        odom.twist.twist.linear.z = state_.v.z();
+        pub_odom_->publish(odom);
+
+        geometry_msgs::msg::PoseStamped pose;
+        pose.header = odom.header;
+        pose.pose = odom.pose.pose;
+        pub_pose_->publish(pose);
+
+        // TODO: Path
+    }
+
+    void OdomNode::publishTf() {
+
+        geometry_msgs::msg::TransformStamped tf;
+        tf.header.stamp = current_stamp_;
+        tf.header.frame_id = "odom";
+        tf.child_frame_id = "body";
+        tf.transform.translation.x = state_.pose.p.x();
+        tf.transform.translation.y = state_.pose.p.y();
+        tf.transform.translation.z = state_.pose.p.z();
+        tf.transform.rotation.w = state_.pose.q.w();
+        tf.transform.rotation.x = state_.pose.q.x();
+        tf.transform.rotation.y = state_.pose.q.y();
+        tf.transform.rotation.z = state_.pose.q.z();
+        tf_broadcaster_->sendTransform(tf);
     }
 } // small_dlio

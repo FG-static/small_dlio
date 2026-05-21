@@ -2,6 +2,7 @@
 #define SMALL_DLIO__ODOM_NODE
 
 #include "point_types.hpp"
+#include "rclcpp/time.hpp"
 
 namespace small_dlio {
 
@@ -19,6 +20,9 @@ namespace small_dlio {
         void callbackLivoxCloud(
             const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg
         );
+
+        void publishOdometry();
+        void publishTf();
 
         rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr
             sub_imu_;
@@ -102,6 +106,7 @@ namespace small_dlio {
         );
 
         State state_;
+        rclcpp::Time current_stamp_;
 
         std::deque<ImuMeas> imu_data_;
         std::vector<KeyFrame> keyframes_;
