@@ -10,6 +10,7 @@
 #include "tf2/LinearMath/Quaternion.hpp"
 #include "tf2_eigen/tf2_eigen.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
+#include "sensor_msgs/msg/point_cloud2.hpp"
 
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
@@ -20,6 +21,7 @@
 #include <algorithm>
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "sensor_msgs/msg/point_field.hpp"
+#include "sensor_msgs/msg/imu.hpp"
 
 #include <pcl-1.14/pcl/point_cloud.h> // 点云基础类型
 #include <pcl-1.14/pcl/point_types.h> // 点类型定义

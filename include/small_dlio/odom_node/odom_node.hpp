@@ -12,8 +12,40 @@ namespace small_dlio {
         OdomNode();
     private:
 
+        // ROS 层面
+        void callbackImu(
+            const sensor_msgs::msg::Imu::SharedPtr &msg
+        );
+        void callbackPointCloud(
+            const sensor_msgs::msg::PointCloud2::SharedPtr &msg
+        );
+
+        rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr
+            sub_imu_;
+        rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr
+            sub_cloud_;
+        rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr
+            pub_odom_;
+        rclcpp::Publisher<geomtry_msgs::msg::PoseStamped>::SharedPtr
+            pub_pose_;
+        rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr
+            pub_path_;
+        std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+
+        std::mutex mtx_;
+        rclcpp::CallbackGroup::SharedPtr imu_cb_group_;
+        rclcpp::CallbackGroup::SharedPtr cloud_cb_group_;
+
+        double prev_imu_stamp_ = 0.0;
+        double prev_scan_stamp_ = 0.0;
+        Eigen::Vector3d prev_acc_ = Eigen::Vector3d::Zero();
+        Eigen::Vector3d prev_gyro_ = Eigen::Vector3d::Zero();
+
+        bool initialized_ = false;
+
         void loadParams();
 
+        // 分块核心函数
         bool motionCorrection(
             const pcl::PointCloud<PointXYZIT>::Ptr &cloud_in,
             const State &prev_state,
@@ -29,7 +61,6 @@ namespace small_dlio {
         ) const;
 
         bool submapGeneration(
-            const std::vector<KeyFrame> &keyframes,
             const State &cur_state,
             pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_submap
         ) const;

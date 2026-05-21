@@ -5,8 +5,65 @@ namespace small_dlio {
     OdomNode::OdomNode() : Node("small_dlio_odom") {
 
         loadParams();
+
+        imu_cb_group_ = create_callback_group(
+            rclcpp::CallbackGroupType::MutuallyExclusive
+        );
+        cloud_cb_group_ = create_callback_group(
+            rclcpp::CallbackGroupType::MutuallyExclusive
+        );
+
+        auto imu_opt = rclcpp::SubscriptionOptions();
+        imu_opt.callback_group = imu_cb_group_;
+        auto cloud_opt = rclcpp::SubscriptionOptions();
+        cloud_opt.callback_group = cloud_cb_group_;
+
+        sub_imu_ = 
+            create_subscription<sensor_msgs::msg::Imu>(
+                "imu", 10,
+                [this](sensor_msgs::msg::Imu::SharedPtr &msg) {
+
+                    callbackImu(msg);
+                },
+                imu_opt
+            );
+        sub_cloud_ =
+            create_subscription<sensor_msgs::msg::PointCloud2>(
+                "cloud", 10,
+                [this](sensor_msgs::msg::PointCloud2::SharedPtr &msg) {
+                 
+                    callbackCloud(msg);
+                },
+                cloud_opt
+            );
+        
+        pub_odom_ = 
+            create_publsher<nav_msgs::msg::Odometry>(
+                "odom", 10
+            );
+        pub_path_ = 
+            create_publsher<nav_msgs::msg::Path>(
+                "path", 10
+            );
+        pub_pose_ = 
+            create_publsher<geometry_msgs::msg::PoseStamped>(
+                "pose", 10
+            );
     }
 
+    /**
+     * @brief 去除点云运动畸变 + 将点云转换到世界坐标系下
+     * @param cloud_in 输入点云
+     * @param prev_state 上一帧的积分后状态
+     * @param scan_start_time 该帧点云的扫描开始时间
+     * @param cloud_out 输出去畸变点云
+     * @param state_end 输出积分后状态
+     * @return bool 是否成功
+     * 
+     * 将点云按 offset_time 排序后对每个点按时间戳进行 imu 数据积分，同时同步推进
+     * 当前小车状态，在完成所有点云处理后小车状态会被积分到点云扫描结束的位置，在处理
+     * 点云后，还对每个点云做了转换到世界坐标系的变换
+     */
     bool OdomNode::motionCorrection(
         const pcl::PointCloud<PointXYZIT>::Ptr &cloud_in,
         const State &prev_state,
@@ -52,7 +109,6 @@ namespace small_dlio {
     }
 
     bool OdomNode::submapGeneration(
-        const std::vector<KeyFrame> &keyframes,
         const State &cur_state,
         pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_submap
     ) const {
@@ -61,16 +117,16 @@ namespace small_dlio {
         
         // TODO: 临时使用kNN暴力匹配，后续换kdtree加速
         std::vector<std::pair<double, size_t>> dists;
-        for (size_t i = 0; i < keyframes.size(); i ++) {
+        for (size_t i = 0; i < keyframes_.size(); i ++) {
 
-            double d = (keyframes[i].pose.p - cur_state.pose.p).norm();
+            double d = (keyframes_[i].pose.p - cur_state.pose.p).norm();
             dists.emplace_back(d, i);
         }
         std::sort(dists.begin(), dists.end());
         for (size_t i = 0; i < std::min(dists.size(), static_cast<size_t>(knn_limit_)); i ++) {
 
             if (dists[i].first > max_distance_) break;
-            *cloud_submap += *keyframes[dists[i].second].cloud;
+            *cloud_submap += *keyframes_[dists[i].second].cloud;
         }
 
         return true;
@@ -302,5 +358,49 @@ namespace small_dlio {
 
         imu_data_.front().stamp_ns = t_point;
         return true;
+    }
+
+    void OdomNode::callbackImu(
+        const sensor_msgs::msg::Imu::SharedPtr &msg
+    ) {
+
+        std::lock_guard<std::mutex> lock(mtx_);
+
+        double stamp = 
+            msg->header.stamp.seconds() +
+            msg->header.stamp.nanoseconds() * 1e-9;
+        
+        double dt = stamp - prev_imu_stamp_;
+        if (prev_imu_stamp_ == 0.0) {
+
+            prev_imu_stamp_ = stamp;
+            return;
+        }
+        prev_imu_stamp_ = stamp;
+        
+        ImuMeas imu;
+        imu.dt = dt;
+        imu.stamp_ns = msg->header.stamp.seconds() +
+            msg->header.stamp.nanoseconds() * 1e-9;
+        imu.acc = Eigen::Vector3d(
+            msg->linear_acceleration.x, 
+            msg->linear_acceleration.y, 
+            msg->linear_acceleration.z
+        );
+        imu.gyro = Eigen::Vector3d(
+            msg->angular_velocity.x, 
+            msg->angular_velocity.y,
+            msg->angular_velocity.z
+        );
+        imu_data_.push_back(imu);
+        statePropagation(imu, dt);
+    }
+
+    void OdomNode::callbackPointCloud(
+        const sensor_msgs::msg::PointCloud2::SharedPtr &msg
+    ) {
+
+        std::lock_guard<std::mutex> lock(mtx_);
+        
     }
 } // small_dlio
