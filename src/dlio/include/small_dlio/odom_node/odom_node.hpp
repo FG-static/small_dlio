@@ -128,6 +128,7 @@ namespace small_dlio {
         std::string cloud_topic_ = "/livox/lidar";
         std::string odom_frame_ = "odom";
         std::string body_frame_ = "body";
+        std::string lidar_frame_ = "livox_frame";
 
         // Submap
         int knn_limit_ = 5;

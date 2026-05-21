@@ -4,6 +4,7 @@ small_dlio_odom:
     # ========== Frame IDs ==========
     odom_frame: "odom"
     body_frame: "body"
+    lidar_frame: "livox_frame"
 
     # ========== Topics ==========
     imu_topic: "/livox/imu"
@@ -43,4 +44,3 @@ small_dlio_odom:
     geo_Ka: 1.0
     geo_Kg: 1.0
     geo_b_max: 1.0
-

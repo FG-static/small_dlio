@@ -6,6 +6,7 @@
 #include "nav_msgs/msg/odometry.hpp"
 #include "pcl/impl/point_types.hpp"
 #include "pcl/point_cloud.h"
+#include "rclcpp/qos.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include <memory>
 
@@ -36,7 +37,7 @@ namespace small_dlio {
 
         sub_imu_ =
             create_subscription<sensor_msgs::msg::Imu>(
-                imu_topic_, 10,
+                imu_topic_, rclcpp::SensorDataQoS(),
                 [this](sensor_msgs::msg::Imu::SharedPtr msg) {
 
                     callbackImu(msg);
@@ -45,7 +46,7 @@ namespace small_dlio {
             );
         sub_cloud_ =
             create_subscription<livox_ros_driver2::msg::CustomMsg>(
-                cloud_topic_, 10,
+                cloud_topic_, rclcpp::SensorDataQoS(),
                 [this](livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
                  
                     callbackLivoxCloud(msg);
@@ -74,7 +75,7 @@ namespace small_dlio {
         geometry_msgs::msg::TransformStamped static_tf;
         static_tf.header.stamp = now();
         static_tf.header.frame_id = body_frame_;
-        static_tf.child_frame_id = "lidar";
+        static_tf.child_frame_id = lidar_frame_;
         static_tf.transform.translation.x = extrinsics_.t_body_lidar.x();
         static_tf.transform.translation.y = extrinsics_.t_body_lidar.y();
         static_tf.transform.translation.z = extrinsics_.t_body_lidar.z();
@@ -90,6 +91,7 @@ namespace small_dlio {
         // Frames
         declare_param("odom_frame", odom_frame_, std::string("odom"));
         declare_param("body_frame", body_frame_, std::string("body"));
+        declare_param("lidar_frame", lidar_frame_, std::string("livox_frame"));
 
         // Topics
         declare_param("imu_topic", imu_topic_, std::string("/livox/imu"));
@@ -222,8 +224,15 @@ namespace small_dlio {
         std::sort(dists.begin(), dists.end());
         for (size_t i = 0; i < std::min(dists.size(), static_cast<size_t>(knn_limit_)); i ++) {
 
+            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+                "submap kf[%zu]: dist=%.2f, cloud_size=%zu",
+                dists[i].second, dists[i].first,
+                keyframes_[dists[i].second].cloud ? keyframes_[dists[i].second].cloud->size() : 0);
             if (dists[i].first > max_distance_) break;
-            *cloud_submap += *keyframes_[dists[i].second].cloud;
+            const auto &kf_cloud = keyframes_[dists[i].second].cloud;
+            if (kf_cloud && !kf_cloud->empty()) {
+                *cloud_submap += *kf_cloud;
+            }
         }
 
         return true;
@@ -506,6 +515,11 @@ namespace small_dlio {
     ) {
 
         std::lock_guard<std::mutex> lock(mtx_);
+
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+            "callbackLivoxCloud triggered, imu_queue=%zu, keyframes=%zu",
+            imu_data_.size(), keyframes_.size());
+
         auto cloud = std::make_shared<pcl::PointCloud<PointXYZIT>>();
         cloud->reserve(msg->points.size());
 
@@ -540,9 +554,14 @@ namespace small_dlio {
         // deskew
         auto cloud_deskewed = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
         State imu_state;
+
         if (!motionCorrection(cloud, state_, scan_start, cloud_deskewed, imu_state) ||
-            cloud_deskewed->empty())
+            cloud_deskewed->empty()) {
+            RCLCPP_WARN(get_logger(), "motionCorrection failed or empty result");
             return;
+        }
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+            "motionCorrection OK, deskewed=%zu points", cloud_deskewed->size());
 
         // 发布去畸变点云（世界坐标系）
         sensor_msgs::msg::PointCloud2 cloud_msg;
@@ -558,44 +577,64 @@ namespace small_dlio {
             current_stamp_ = msg->header.stamp;
             publishOdometry();
             publishTf();
+            RCLCPP_INFO(get_logger(), "First keyframe published");
             return;
         }
-        
-        // submapGeneration
+
+        // submapGeneration: use state_ (fused_state from previous frame)
         auto submap = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-        submapGeneration(imu_state, submap);
+        submapGeneration(state_, submap);
+
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+            "submapGeneration: %zu points from %zu keyframes",
+            submap->size(), keyframes_.size());
+
         if (submap->empty())
             return;
 
         // gicp
-         Eigen::Matrix4d T_gicp;
-         double score;
-         if (!scanToMap(cloud_deskewed, submap, T_gicp, score)) return;
+        Eigen::Matrix4d T_gicp;
+        double score;
 
-         Pose gicp_pose;
-         gicp_pose.p = T_gicp.block<3, 1>(0, 3);
-         gicp_pose.q = Eigen::Quaterniond(T_gicp.block<3, 3>(0, 0));
+        if (!scanToMap(cloud_deskewed, submap, T_gicp, score)) {
+            RCLCPP_WARN(get_logger(), "scanToMap failed");
+            return;
+        }
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+            "scanToMap OK, score=%.4f", score);
 
-         // geometricFuser
-         State fused_state;
-         geometricFuser(imu_state, gicp_pose, dt, fused_state);
-         state_ = fused_state;
+        Pose gicp_pose;
+        gicp_pose.p = T_gicp.block<3, 1>(0, 3);
+        gicp_pose.q = Eigen::Quaterniond(T_gicp.block<3, 3>(0, 0));
 
-         // keyframeDetection
-         keyframeDetection(fused_state, cloud_deskewed, score);
+        // geometricFuser
+        State fused_state;
+        geometricFuser(imu_state, gicp_pose, dt, fused_state);
+        state_ = fused_state;
 
-         // publish
-         current_stamp_ = msg->header.stamp;
-         publishOdometry();
-         publishTf();
+        // keyframeDetection
+        keyframeDetection(fused_state, cloud_deskewed, score);
+
+        // publish
+        current_stamp_ = msg->header.stamp;
+        publishOdometry();
+        publishTf();
+
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+            "Published odom, pos=[%.2f, %.2f, %.2f]",
+            state_.pose.p.x(), state_.pose.p.y(), state_.pose.p.z());
     }
 
     void OdomNode::publishOdometry() {
 
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+            "publishOdometry called, pos=[%.2f, %.2f, %.2f]",
+            state_.pose.p.x(), state_.pose.p.y(), state_.pose.p.z());
+
         nav_msgs::msg::Odometry odom;
         odom.header.stamp = current_stamp_;
-        odom.header.frame_id = "odom";
-        odom.child_frame_id = "body";
+        odom.header.frame_id = odom_frame_;
+        odom.child_frame_id = body_frame_;
         odom.pose.pose.orientation.w = state_.pose.q.w();
         odom.pose.pose.orientation.x = state_.pose.q.x();
         odom.pose.pose.orientation.y = state_.pose.q.y();
@@ -622,8 +661,8 @@ namespace small_dlio {
 
         geometry_msgs::msg::TransformStamped tf;
         tf.header.stamp = current_stamp_;
-        tf.header.frame_id = "odom";
-        tf.child_frame_id = "body";
+        tf.header.frame_id = odom_frame_;
+        tf.child_frame_id = body_frame_;
         tf.transform.translation.x = state_.pose.p.x();
         tf.transform.translation.y = state_.pose.p.y();
         tf.transform.translation.z = state_.pose.p.z();
