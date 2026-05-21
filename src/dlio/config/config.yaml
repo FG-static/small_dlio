@@ -1,4 +1,4 @@
-/**:
+small_dlio_odom:
   ros__parameters:
 
     # ========== Frame IDs ==========

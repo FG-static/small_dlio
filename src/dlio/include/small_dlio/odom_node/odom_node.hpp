@@ -1,6 +1,7 @@
 #ifndef SMALL_DLIO__ODOM_NODE
 #define SMALL_DLIO__ODOM_NODE
 
+#include "nav_msgs/msg/path.hpp"
 #include "point_types.hpp"
 #include "rclcpp/time.hpp"
 
@@ -34,7 +35,10 @@ namespace small_dlio {
             pub_pose_;
         rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr
             pub_path_;
+        rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
+            pub_cloud_;
         std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+        std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
 
         std::mutex mtx_;
         rclcpp::CallbackGroup::SharedPtr imu_cb_group_;
@@ -46,6 +50,12 @@ namespace small_dlio {
         Eigen::Vector3d prev_gyro_ = Eigen::Vector3d::Zero();
 
         bool initialized_ = false;
+
+        template <typename T>
+        void declare_param(const std::string &name, T &param, const T &default_value) {
+            this->declare_parameter(name, default_value);
+            this->get_parameter(name, param);
+        }
 
         void loadParams();
 
@@ -106,22 +116,38 @@ namespace small_dlio {
         );
 
         State state_;
+        Extrinsics extrinsics_;
         rclcpp::Time current_stamp_;
 
         std::deque<ImuMeas> imu_data_;
         std::vector<KeyFrame> keyframes_;
+        nav_msgs::msg::Path path_;
 
+        // Topics & frames
+        std::string imu_topic_ = "/livox/imu";
+        std::string cloud_topic_ = "/livox/lidar";
+        std::string odom_frame_ = "odom";
+        std::string body_frame_ = "body";
+
+        // Submap
         int knn_limit_ = 5;
         double max_distance_ = 20.0;
+
+        // GICP
         double gicp_leaf_size_ = 0.10;
+        int gicp_num_threads_ = 4;
+        int gicp_correspondence_randomness_ = 20;
+        double gicp_max_correspondence_distance_ = 1.0;
 
-        double Kp_ = 4.5;
-        double Kq_ = 4.0;
-        double Kv_ = 11.25;
-        double Ka_ = 2.25;
+        // Geometric observer
+        double Kp_ = 1.0;
+        double Kq_ = 1.0;
+        double Kv_ = 1.0;
+        double Ka_ = 1.0;
         double Kg_ = 1.0;
-        double b_max_ = 1.0; // TODO: 后期上下限单独分开
+        double b_max_ = 1.0;
 
+        // Keyframe detection
         double kf_trans_thresh_ = 0.5;
         double kf_rot_thresh_ = 10.0 * M_PI / 180.0;
         double max_alignment_score_ = 1.0;
