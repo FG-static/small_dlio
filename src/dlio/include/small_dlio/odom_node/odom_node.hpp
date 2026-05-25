@@ -71,12 +71,9 @@ namespace small_dlio {
         // 分块核心函数
         bool motionCorrection(
             const pcl::PointCloud<PointXYZIT>::Ptr &cloud_in,
-            const State &prev_state,
-            const double &scan_start_time,
-            const std::deque<ImuMeas> &imu_buffer,
-            pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_out,
-            State &state_end
-        );
+            const FrameTrajectory &trajectory,
+            pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_out
+        ) const;
 
         // TODO: maybe remove
         bool optimizationPrior(
@@ -115,6 +112,13 @@ namespace small_dlio {
             const ImuMeas &imu,
             const double &dt
         );
+
+        bool buildTrajectory(
+            const State &start_state,
+            const std::deque<ImuMeas> &imu_buffer,
+            const std::vector<double> &timestamps,
+            FrameTrajectory &trajectory
+        ) const;
 
         bool integrateStep(
             State &state,

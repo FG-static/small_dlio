@@ -74,6 +74,19 @@ namespace small_dlio {
         double scan_start = 0.0;
         double scan_dt = 0.0;
     };
+
+    struct TrajectorySample {
+
+        double stamp = 0.0;
+        State state;
+    };
+
+    struct FrameTrajectory {
+
+        std::vector<TrajectorySample> samples;
+        std::vector<int> point_sample_indices;
+        size_t median_index = 0;
+    };
 } // small_dlio
 
 #endif

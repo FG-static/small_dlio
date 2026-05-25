@@ -7,10 +7,14 @@
 #include "nav_msgs/msg/odometry.hpp"
 #include "pcl/impl/point_types.hpp"
 #include "pcl/point_cloud.h"
+#include "point_types.hpp"
 #include "rclcpp/qos.hpp"
 #include "rclcpp/utilities.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
+#include <chrono>
+#include <deque>
 #include <memory>
+#include <vector>
 
 namespace small_dlio {
 
@@ -170,50 +174,64 @@ namespace small_dlio {
     /**
      * @brief 去除点云运动畸变 + 将点云转换到世界坐标系下
      * @param cloud_in 输入点云
-     * @param prev_state 上一帧的积分后状态
-     * @param scan_start_time 该帧点云的扫描开始时间
+     * @param trajectory 用于去除畸变用的参照轨迹
      * @param cloud_out 输出去畸变点云
-     * @param state_end 输出积分后状态
      * @return bool 是否成功
      * 
-     * 将点云按 offset_time 排序后对每个点按时间戳进行 imu 数据积分，同时同步推进
-     * 当前小车状态，在完成所有点云处理后小车状态会被积分到点云扫描结束的位置，在处理
-     * 点云后，还对每个点云做了转换到世界坐标系的变换
+     * 本函数仅按照参照轨迹进行点云运动畸变处理，轨迹生成由 buildTrajectory 完成
      */
     bool OdomNode::motionCorrection(
         const pcl::PointCloud<PointXYZIT>::Ptr &cloud_in,
-        const State &prev_state,
-        const double &scan_start_time,
-        const std::deque<ImuMeas> &imu_buffer,
-        pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_out,
-        State &state_end
-    ) {
-        
+        const FrameTrajectory &trajectory,
+        pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_out
+    ) const {
+
+        if (!cloud_in || cloud_in->empty() || trajectory.samples.empty())
+            return false;
+
         pcl::PointCloud<PointXYZIT> cloud_sorted = *cloud_in;
         std::sort(cloud_sorted.points.begin(), cloud_sorted.points.end(),
-                  [](const PointXYZIT &a, const PointXYZIT &b) {
-                      return a.offset_time < b.offset_time;
-                  });
-        
-        state_end = prev_state;
-        auto imu_work = imu_buffer;
+            [](const PointXYZIT &a, const PointXYZIT &b) {
+
+                return a.offset_time < b.offset_time;
+            }
+        );
+
         cloud_out->clear();
         cloud_out->reserve(cloud_sorted.size());
 
+        // deskew start from scan_start_time
+        const double scan_start_time = trajectory.samples.front().stamp;
         for (const auto &point : cloud_sorted) {
 
-            double t_point = scan_start_time + point.offset_time;
-            if (!integrateImu(state_end, t_point, imu_work)) {
-             
-                RCLCPP_WARN(get_logger(), "Failed to integrate IMU data at time %f", t_point);
-                continue;
+            const double t_point = scan_start_time + point.offset_time;
+            // find the car point which in t_point as a iterator
+            auto sample_it = std::lower_bound(
+                trajectory.samples.begin(),
+                trajectory.samples.end(),
+                t_point,
+                [](const TrajectorySample &sample, const double stamp) {
+                    return sample.stamp < stamp;
+                }
+            );
+
+            if (sample_it == trajectory.samples.end())
+                sample_it = std::prev(trajectory.samples.end());
+            else if (sample_it != trajectory.samples.begin()) {
+
+                const auto prev_it = std::prev(sample_it);
+                if (std::abs(prev_it->stamp - t_point) <
+                    std::abs(sample_it->stamp - t_point))
+                    sample_it = prev_it;
             }
 
+            const State &point_state = sample_it->state;
             Eigen::Matrix4d T = Eigen::Matrix4d::Zero();
-            T.block<3, 3>(0, 0) = state_end.pose.q.toRotationMatrix();
-            T.block<3, 1>(0, 3) = state_end.pose.p;
+            T.block<3, 3>(0, 0) = point_state.pose.q.toRotationMatrix();
+            T.block<3, 1>(0, 3) = point_state.pose.p;
             T(3, 3) = 1.0;
 
+            // body -> world
             Eigen::Vector4d point_lidar(point.x, point.y, point.z, 1.0);
             Eigen::Vector4d point_world = T * point_lidar;
 
@@ -272,30 +290,14 @@ namespace small_dlio {
             return false;
         }
 
-        pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
-        voxel_filter.setLeafSize(
-            static_cast<float>(gicp_leaf_size_),
-            static_cast<float>(gicp_leaf_size_),
-            static_cast<float>(gicp_leaf_size_)
-        );
-
-        pcl::PointCloud<pcl::PointXYZ>::Ptr 
-            filtered_source(new pcl::PointCloud<pcl::PointXYZ>),
-            filtered_target(new pcl::PointCloud<pcl::PointXYZ>);
-        
-        voxel_filter.setInputCloud(source_cloud);
-        voxel_filter.filter(*filtered_source);
-        voxel_filter.setInputCloud(target_cloud);
-        voxel_filter.filter(*filtered_target);
-
         small_gicp::RegistrationPCL<pcl::PointXYZ, pcl::PointXYZ> reg;
         reg.setNumThreads(gicp_num_threads_);
         reg.setCorrespondenceRandomness(gicp_correspondence_randomness_);
         reg.setMaxCorrespondenceDistance(gicp_max_correspondence_distance_);
         reg.setRegistrationType("GICP");
 
-        reg.setInputSource(filtered_source);
-        reg.setInputTarget(filtered_target);
+        reg.setInputSource(source_cloud);
+        reg.setInputTarget(target_cloud);
 
         auto aligned = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
 
@@ -407,6 +409,113 @@ namespace small_dlio {
 
         keyframes_.push_back(kf);
         return true;
+    }
+
+    /**
+     * @brief 积分构建 SE(3) 参考轨迹
+     * @param start_state 上一次帧的 fused_state
+     * @param imu_buffer imu 历史数据，用于积分状态
+     * @param timestamps 时间戳数组，对应 imu_buffer
+     * @param trajectory 输出轨迹
+     * @return bool 是否成功
+     *
+     * 本函数用于构建给 motionCorrection 使用的小车 SE(3) 参考轨迹
+     */
+    bool OdomNode::buildTrajectory(
+        const State &start_state,
+        const std::deque<ImuMeas> &imu_buffer,
+        const std::vector<double> &timestamps,
+        FrameTrajectory &trajectory
+    ) const {
+
+        trajectory.samples.clear();
+        trajectory.point_sample_indices.clear();
+        trajectory.median_index = 0;
+
+        if (timestamps.empty() ||
+            !start_state.pose.p.allFinite() ||
+            !start_state.pose.q.coeffs().allFinite() ||
+            !start_state.v.allFinite() ||
+            !start_state.b_a.allFinite() ||
+            !start_state.b_g.allFinite())
+            return false;
+
+        std::vector<double> sorted_timestamps = timestamps;
+        std::sort(sorted_timestamps.begin(), sorted_timestamps.end());
+        sorted_timestamps.erase(
+            std::unique(
+                sorted_timestamps.begin(),
+                sorted_timestamps.end(),
+                [](const double a, const double b) {
+                    return std::abs(a - b) < 1e-9;
+                }),
+            sorted_timestamps.end()
+        );
+
+        // check
+        for (const double stamp : sorted_timestamps) {
+
+            if (!std::isfinite(stamp))
+                return false;
+        }
+
+        State cur_state = start_state;
+        double cur_time = sorted_timestamps.front();
+        std::deque<ImuMeas> imu_work = imu_buffer;
+        std::sort(
+            imu_work.begin(), imu_work.end(),
+            [](const ImuMeas &a, const ImuMeas &b) {
+                return a.stamp < b.stamp;
+            }
+        );
+        if (imu_work.empty() && sorted_timestamps.size() > 1)
+            return false;
+
+        while (imu_work.size() >= 2 && imu_work[1].stamp <= cur_time) 
+            imu_work.pop_front();
+        if (!imu_work.empty() && imu_work.front().stamp < cur_time) 
+            imu_work.front().stamp = cur_time;
+
+        trajectory.samples.reserve(sorted_timestamps.size());
+        trajectory.samples.push_back({cur_time, cur_state});
+
+        for (size_t i = 1; i < sorted_timestamps.size(); ++ i) {
+
+            const double target_time = sorted_timestamps[i];
+            if (target_time < cur_time)
+                return false;
+
+            while (imu_work.size() >= 2 && imu_work[1].stamp <= target_time) {
+
+                const double dt = imu_work[1].stamp - imu_work[0].stamp;
+                if (!integrateStep(cur_state, imu_work[0], dt))
+                    return false;
+
+                cur_time = imu_work[1].stamp;
+                imu_work.pop_front();
+            }
+
+            if (!imu_work.empty()) {
+
+                const double interval_start = std::max(cur_time, imu_work.front().stamp);
+                if (target_time > interval_start) {
+
+                    const double dt = target_time - interval_start;
+                    if (!integrateStep(cur_state, imu_work.front(), dt))
+                        return false;
+
+                    cur_time = target_time;
+                    imu_work.front().stamp = cur_time;
+                }
+            }
+
+            trajectory.samples.push_back({target_time, cur_state});
+        }
+
+        // select the median stamp
+        trajectory.median_index = trajectory.samples.size() / 2;
+        return true;
+
     }
 
     bool OdomNode::statePropagation(
@@ -654,6 +763,12 @@ PROPAGATION:
         const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg
     ) {
 
+        const auto t_total_start = std::chrono::steady_clock::now();
+        auto t_stage = t_total_start;
+        auto elapsed_ms = [](const auto &start, const auto &end) {
+            return std::chrono::duration<double, std::milli>(end - start).count();
+        };
+
         auto cloud = std::make_shared<pcl::PointCloud<PointXYZIT>>();
         cloud->reserve(msg->points.size());
         double max_offset_time = 0.0;
@@ -677,6 +792,10 @@ PROPAGATION:
 
         if (cloud->empty())
             return;
+
+        const auto t_convert_done = std::chrono::steady_clock::now();
+        const double convert_ms = elapsed_ms(t_stage, t_convert_done);
+        t_stage = t_convert_done;
 
         // create a snapshot data
         FrameSnapshot snapshot;
@@ -707,14 +826,47 @@ PROPAGATION:
             snapshot.keyframes = keyframes_;
         }
 
+        const auto t_snapshot_done = std::chrono::steady_clock::now();
+        const double snapshot_ms = elapsed_ms(t_stage, t_snapshot_done);
+        t_stage = t_snapshot_done;
+
         const double scan_end_time = snapshot.scan_start + max_offset_time;
+        std::vector<double> timestamps;
+        constexpr double trajectory_dt = 0.001;
+        const size_t trajectory_count = static_cast<size_t>(
+            std::ceil(std::max(0.0, scan_end_time - snapshot.scan_start) / trajectory_dt)
+        ) + 2;
+        timestamps.reserve(trajectory_count);
+        timestamps.push_back(snapshot.scan_start);
+        for (double t = snapshot.scan_start + trajectory_dt;
+             t < scan_end_time;
+             t += trajectory_dt) {
+            timestamps.push_back(t);
+        }
+        timestamps.push_back(scan_end_time);
+    
+        // buildTrajectory
+        FrameTrajectory trajectory;
+        if (!buildTrajectory(
+                snapshot.scan_start_state,
+                snapshot.imu_buffer,
+                timestamps,
+                trajectory) ||
+            trajectory.samples.empty()) {
+
+            RCLCPP_WARN(get_logger(), "buildTrajectory failed or empty result");
+            return;
+        }
+
+        const auto t_trajectory_done = std::chrono::steady_clock::now();
+        const double trajectory_ms = elapsed_ms(t_stage, t_trajectory_done);
+        t_stage = t_trajectory_done;
+
         auto cloud_deskewed = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-        State imu_state;
+        State imu_state = trajectory.samples.back().state;
 
         // motionCorrection
-        if (!motionCorrection(
-                cloud, snapshot.scan_start_state, snapshot.scan_start,
-                snapshot.imu_buffer, cloud_deskewed, imu_state) ||
+        if (!motionCorrection(cloud, trajectory, cloud_deskewed) ||
             cloud_deskewed->empty()) {
 
             RCLCPP_WARN(get_logger(), "motionCorrection failed or empty result");
@@ -723,11 +875,37 @@ PROPAGATION:
         RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
             "motionCorrection OK, deskewed=%zu points", cloud_deskewed->size());
 
+        const auto t_deskew_done = std::chrono::steady_clock::now();
+        const double deskew_ms = elapsed_ms(t_stage, t_deskew_done);
+        t_stage = t_deskew_done;
+
+        pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
+        voxel_filter.setLeafSize(
+            static_cast<float>(gicp_leaf_size_),
+            static_cast<float>(gicp_leaf_size_),
+            static_cast<float>(gicp_leaf_size_)
+        );
+        auto cloud_filtered = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        voxel_filter.setInputCloud(cloud_deskewed);
+        voxel_filter.filter(*cloud_filtered);
+        if (cloud_filtered->empty()) {
+            RCLCPP_WARN(get_logger(), "voxel filter produced empty cloud");
+            return;
+        }
+
+        const auto t_filter_done = std::chrono::steady_clock::now();
+        const double filter_ms = elapsed_ms(t_stage, t_filter_done);
+        t_stage = t_filter_done;
+
         sensor_msgs::msg::PointCloud2 cloud_msg;
         pcl::toROSMsg(*cloud_deskewed, cloud_msg);
         cloud_msg.header.stamp = stamp;
         cloud_msg.header.frame_id = odom_frame_;
         pub_cloud_->publish(cloud_msg);
+
+        const auto t_publish_cloud_done = std::chrono::steady_clock::now();
+        const double publish_cloud_ms = elapsed_ms(t_stage, t_publish_cloud_done);
+        t_stage = t_publish_cloud_done;
 
         /**
          * @brief 帧结束收尾工作
@@ -789,7 +967,7 @@ PROPAGATION:
         if (snapshot.keyframes.empty()) {
 
             auto cloud_aligned =
-                std::make_shared<pcl::PointCloud<pcl::PointXYZ>>(*cloud_deskewed);
+                std::make_shared<pcl::PointCloud<pcl::PointXYZ>>(*cloud_filtered);
             const Pose first_pose = imu_state.pose;
             commit_frame(imu_state, true, &first_pose, cloud_aligned, 0.0, nullptr);
             RCLCPP_INFO(get_logger(), "First keyframe published");
@@ -804,10 +982,22 @@ PROPAGATION:
             "submapGeneration: %zu points from %zu keyframes",
             submap->size(), snapshot.keyframes.size());
 
+        const auto t_submap_done = std::chrono::steady_clock::now();
+        const double submap_ms = elapsed_ms(t_stage, t_submap_done);
+        t_stage = t_submap_done;
+
         if (submap->empty()) {
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
                 "submapGeneration produced an empty submap, committed IMU-only state");
             commit_frame(imu_state, false, nullptr, pcl::PointCloud<pcl::PointXYZ>::Ptr(), 0.0, nullptr);
+            const auto t_commit_done = std::chrono::steady_clock::now();
+            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
+                "timing ms: convert=%.1f snapshot=%.1f trajectory=%.1f deskew=%.1f "
+                "filter=%.1f publish_cloud=%.1f submap=%.1f gicp=%.1f commit=%.1f total=%.1f",
+                convert_ms, snapshot_ms, trajectory_ms, deskew_ms,
+                filter_ms, publish_cloud_ms, submap_ms, 0.0,
+                elapsed_ms(t_submap_done, t_commit_done),
+                elapsed_ms(t_total_start, t_commit_done));
             return;
         }
 
@@ -815,15 +1005,27 @@ PROPAGATION:
         double score;
 
         // scanToMap
-        if (!scanToMap(cloud_deskewed, submap, snapshot.init_gicp, T_gicp, score)) {
+        if (!scanToMap(cloud_filtered, submap, snapshot.init_gicp, T_gicp, score)) {
 
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
                 "scanToMap failed, committed IMU-only state");
             commit_frame(imu_state, false, nullptr, pcl::PointCloud<pcl::PointXYZ>::Ptr(), 0.0, nullptr);
+            const auto t_commit_done = std::chrono::steady_clock::now();
+            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
+                "timing ms: convert=%.1f snapshot=%.1f trajectory=%.1f deskew=%.1f "
+                "filter=%.1f publish_cloud=%.1f submap=%.1f gicp=%.1f commit=%.1f total=%.1f",
+                convert_ms, snapshot_ms, trajectory_ms, deskew_ms,
+                filter_ms, publish_cloud_ms, submap_ms,
+                elapsed_ms(t_stage, t_commit_done), 0.0,
+                elapsed_ms(t_total_start, t_commit_done));
             return;
         }
         RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
             "scanToMap OK, score=%.4f", score);
+
+        const auto t_gicp_done = std::chrono::steady_clock::now();
+        const double gicp_ms = elapsed_ms(t_stage, t_gicp_done);
+        t_stage = t_gicp_done;
 
         if (score >= max_alignment_score_) {
 
@@ -831,6 +1033,14 @@ PROPAGATION:
                 "GICP score %.4f >= threshold %.4f, committed IMU-only state",
                 score, max_alignment_score_);
             commit_frame(imu_state, false, nullptr, pcl::PointCloud<pcl::PointXYZ>::Ptr(), 0.0, nullptr);
+            const auto t_commit_done = std::chrono::steady_clock::now();
+            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
+                "timing ms: convert=%.1f snapshot=%.1f trajectory=%.1f deskew=%.1f "
+                "filter=%.1f publish_cloud=%.1f submap=%.1f gicp=%.1f commit=%.1f total=%.1f",
+                convert_ms, snapshot_ms, trajectory_ms, deskew_ms,
+                filter_ms, publish_cloud_ms, submap_ms, gicp_ms,
+                elapsed_ms(t_gicp_done, t_commit_done),
+                elapsed_ms(t_total_start, t_commit_done));
             return;
         }
 
@@ -849,10 +1059,20 @@ PROPAGATION:
         geometricFuser(imu_state, gicp_pose, snapshot.scan_dt, fused_state);
 
         auto cloud_aligned = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-        pcl::transformPointCloud(*cloud_deskewed, *cloud_aligned, T_gicp.cast<float>());
+        pcl::transformPointCloud(*cloud_filtered, *cloud_aligned, T_gicp.cast<float>());
 
         // publish normal end
         commit_frame(fused_state, true, &gicp_pose, cloud_aligned, score, &T_gicp);
+
+        const auto t_commit_done = std::chrono::steady_clock::now();
+        const double commit_ms = elapsed_ms(t_stage, t_commit_done);
+        const double total_ms = elapsed_ms(t_total_start, t_commit_done);
+
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
+            "timing ms: convert=%.1f snapshot=%.1f trajectory=%.1f deskew=%.1f "
+            "filter=%.1f publish_cloud=%.1f submap=%.1f gicp=%.1f commit=%.1f total=%.1f",
+            convert_ms, snapshot_ms, trajectory_ms, deskew_ms,
+            filter_ms, publish_cloud_ms, submap_ms, gicp_ms, commit_ms, total_ms);
 
         RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
             "Published odom, pos=[%.2f, %.2f, %.2f]",
