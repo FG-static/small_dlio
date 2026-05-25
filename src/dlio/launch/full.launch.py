@@ -13,7 +13,7 @@ def generate_launch_description():
     config_file = os.path.join(pkg_dir, 'config', 'config.yaml')
 
     rviz_arg = DeclareLaunchArgument(
-        'rviz', default_value='false',
+        'rviz', default_value='true',
         description='Whether to launch RViz2'
     )
 

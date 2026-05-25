@@ -1,5 +1,6 @@
 #include "odom_node/odom_node.hpp"
 #include "Eigen/src/Core/Matrix.h"
+#include "Eigen/src/Core/VectorBlock.h"
 #include "Eigen/src/Geometry/Quaternion.h"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
@@ -7,6 +8,7 @@
 #include "pcl/impl/point_types.hpp"
 #include "pcl/point_cloud.h"
 #include "rclcpp/qos.hpp"
+#include "rclcpp/utilities.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include <memory>
 
@@ -20,6 +22,7 @@ namespace small_dlio {
         state_.v.setZero();
         state_.b_a.setZero();
         state_.b_g.setZero();
+        laser_scan_start_state_ = state_;
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
         static_tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
 
@@ -125,6 +128,15 @@ namespace small_dlio {
         this->declare_parameter("gravity", gravity_default);
         this->get_parameter("gravity", gravity);
         gravity_ = Eigen::Vector3d(gravity[0], gravity[1], gravity[2]);
+        declare_param("imu_acc_scale", imu_acc_scale_, gravity_.norm());
+
+        // Imu Calibration
+        bool imu_calibrate_default = true;
+        double imu_calib_time_default = 1.5;
+        this->declare_parameter("imu_calibrate", imu_calibrate_default);
+        this->get_parameter("imu_calibrate", imu_calibrate_);
+        this->declare_parameter("imu_calib_time", imu_calib_time_default);
+        this->get_parameter("imu_calib_time", imu_calib_time_);
 
         // Keyframe Detection
         declare_param("kf_trans_thresh", kf_trans_thresh_, 0.5);
@@ -474,6 +486,65 @@ namespace small_dlio {
         return true;
     }
 
+    bool OdomNode::finalizeImuCalibration(
+        const Eigen::Vector3d &calib_acc_avg,
+        const Eigen::Vector3d &calib_gyro_avg
+    ) {
+
+        const double acc_norm = calib_acc_avg.norm();
+        if (!std::isfinite(acc_norm) || acc_norm < 1e-6) {
+
+            RCLCPP_WARN(
+                get_logger(),
+                "IMU calibration failed: invalid average acceleration norm %.6f",
+                acc_norm
+            );
+            return false;
+        }
+
+        // pitch and roll
+        // Rodrigues
+        Eigen::Vector3d acc_body_nom =
+            extrinsics_.q_body_imu.conjugate() * (calib_acc_avg / acc_norm);
+
+        Eigen::Vector3d source = acc_body_nom.normalized(); // body
+        Eigen::Vector3d target = (state_.pose.q.conjugate() * gravity_).normalized(); // world -> body
+        Eigen::Vector3d vary = source.cross(target);
+        
+        double sin_v = vary.norm();
+        double cos_v = source.dot(target);
+
+        Eigen::Matrix3d K;
+        K <<         0, -vary.z(),  vary.y(),
+              vary.z(),         0, -vary.x(),
+             -vary.y(),  vary.x(),         0;
+
+        Eigen::Matrix3d R_corr;
+        if (sin_v < 1e-6) R_corr = Eigen::Matrix3d::Identity();
+        else R_corr =
+                Eigen::Matrix3d::Identity() + K + 
+                ((1.0 - cos_v) / (sin_v * sin_v)) * K * K;
+
+        Eigen::Matrix3d R_bi_nom = extrinsics_.q_body_imu.toRotationMatrix();
+        Eigen::Matrix3d R_ib_nom = R_bi_nom.transpose();
+
+        Eigen::Matrix3d R_ib_new = R_corr * R_ib_nom;
+        Eigen::Matrix3d R_bi_new = R_ib_new.transpose();
+
+        extrinsics_.q_body_imu = Eigen::Quaterniond(R_bi_new).normalized();
+
+        const Eigen::Vector3d gravity_body =
+            state_.pose.q.conjugate() * gravity_;
+        const Eigen::Vector3d gravity_imu =
+            extrinsics_.q_body_imu * gravity_body;
+
+        state_.b_a = calib_acc_avg - gravity_imu;
+        state_.b_g = calib_gyro_avg;
+        laser_scan_start_state_ = state_;
+
+        return true;
+    }
+
     void OdomNode::callbackImu(
         const sensor_msgs::msg::Imu::SharedPtr &msg
     ) {
@@ -491,7 +562,7 @@ namespace small_dlio {
             return;
         }
         prev_imu_stamp_ = stamp;
-        
+
         ImuMeas imu;
         imu.dt = dt;
         imu.stamp = msg->header.stamp.sec +
@@ -500,20 +571,79 @@ namespace small_dlio {
             msg->linear_acceleration.x, 
             msg->linear_acceleration.y, 
             msg->linear_acceleration.z
-        );
+        ) * imu_acc_scale_;
         imu.gyro = Eigen::Vector3d(
             msg->angular_velocity.x, 
             msg->angular_velocity.y,
             msg->angular_velocity.z
         );
-        imu_data_.push_back(imu);
-        statePropagation(imu, dt);
+
+        // Imu Calibration
+        if (imu_calibrate_ && !imu_calibrated_) {
+
+            if (!initialized_) {
+
+                first_imu_stamp_ = stamp - dt;
+                initialized_ = true;
+                calib_elapsed = 0.0;
+                calib_samples = 0;
+                calib_acc_sum_.setZero();
+                calib_gyro_sum_.setZero();
+                RCLCPP_INFO(
+                    get_logger(),
+                    "IMU calibration started: target duration %.2f s",
+                    imu_calib_time_
+                );
+            }
+            if (calib_elapsed >= imu_calib_time_) {
+
+                Eigen::Vector3d acc_avg = Eigen::Vector3d::Zero();
+                Eigen::Vector3d gyro_avg = Eigen::Vector3d::Zero();
+                acc_avg = calib_acc_sum_ / calib_samples;
+                gyro_avg = calib_gyro_sum_ / calib_samples;
+                if (!finalizeImuCalibration(acc_avg, gyro_avg)) {
+
+                    RCLCPP_WARN(
+                        get_logger(),
+                        "IMU calibration aborted: samples=%d, elapsed=%.3f s",
+                        calib_samples, calib_elapsed
+                    );
+                    return;
+                }
+                imu_calibrated_ = true;
+                RCLCPP_INFO(
+                    get_logger(),
+                    "IMU calibration completed: samples=%d, elapsed=%.3f s, "
+                    "acc_avg=[%.6f, %.6f, %.6f], gyro_avg=[%.6f, %.6f, %.6f], "
+                    "b_a=[%.6f, %.6f, %.6f], b_g=[%.6f, %.6f, %.6f], "
+                    "q_body_imu=[%.6f, %.6f, %.6f, %.6f]",
+                    calib_samples, calib_elapsed,
+                    acc_avg.x(), acc_avg.y(), acc_avg.z(),
+                    gyro_avg.x(), gyro_avg.y(), gyro_avg.z(),
+                    state_.b_a.x(), state_.b_a.y(), state_.b_a.z(),
+                    state_.b_g.x(), state_.b_g.y(), state_.b_g.z(),
+                    extrinsics_.q_body_imu.w(), extrinsics_.q_body_imu.x(),
+                    extrinsics_.q_body_imu.y(), extrinsics_.q_body_imu.z()
+                );
+                goto PROPAGATION;
+            }
+            calib_acc_sum_ += imu.acc;
+            calib_gyro_sum_ += imu.gyro;
+            calib_elapsed += dt;
+            calib_samples ++;
+        } else {
+
+PROPAGATION:
+            imu_data_.push_back(imu);
+            statePropagation(imu, dt);
+        }
     }
 
     void OdomNode::callbackLivoxCloud(
         const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg
     ) {
 
+        if (imu_calibrate_ && !imu_calibrated_) return;
         std::lock_guard<std::mutex> lock(mtx_);
 
         RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
@@ -555,7 +685,7 @@ namespace small_dlio {
         auto cloud_deskewed = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
         State imu_state;
 
-        if (!motionCorrection(cloud, state_, scan_start, cloud_deskewed, imu_state) ||
+        if (!motionCorrection(cloud, laser_scan_start_state_, scan_start, cloud_deskewed, imu_state) ||
             cloud_deskewed->empty()) {
             RCLCPP_WARN(get_logger(), "motionCorrection failed or empty result");
             return;
@@ -573,6 +703,7 @@ namespace small_dlio {
         if (keyframes_.empty()) {
 
             state_ = imu_state;
+            laser_scan_start_state_ = state_;
             keyframeDetection(state_, cloud_deskewed, 0.0);
             current_stamp_ = msg->header.stamp;
             publishOdometry();
@@ -593,7 +724,7 @@ namespace small_dlio {
             return;
 
         // gicp
-        Eigen::Matrix4d T_gicp;
+        Eigen::Matrix4d T_gicp; // TODO: tomorrow remain to learn the reason about T_global
         double score;
 
         if (!scanToMap(cloud_deskewed, submap, T_gicp, score)) {
@@ -603,14 +734,21 @@ namespace small_dlio {
         RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
             "scanToMap OK, score=%.4f", score);
 
+        Eigen::Matrix4d T_prior = Eigen::Matrix4d::Identity();
+        T_prior.block<3, 3>(0, 0) = imu_state.pose.q.toRotationMatrix();
+        T_prior.block<3, 1>(0, 3) = imu_state.pose.p;
+
+        Eigen::Matrix4d T_global = T_gicp * T_prior;
+
         Pose gicp_pose;
-        gicp_pose.p = T_gicp.block<3, 1>(0, 3);
-        gicp_pose.q = Eigen::Quaterniond(T_gicp.block<3, 3>(0, 0));
+        gicp_pose.p = T_global.block<3, 1>(0, 3);
+        gicp_pose.q = Eigen::Quaterniond(T_global.block<3, 3>(0, 0));
 
         // geometricFuser
         State fused_state;
         geometricFuser(imu_state, gicp_pose, dt, fused_state);
         state_ = fused_state;
+        laser_scan_start_state_ = state_;
 
         // keyframeDetection
         keyframeDetection(fused_state, cloud_deskewed, score);

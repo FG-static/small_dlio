@@ -19,8 +19,13 @@ small_dlio_odom:
     t_body_lidar: [0.0, 0.0, 0.0]
     q_body_lidar: [1.0, 0.0, 0.0, 0.0]
 
-    # ========== Gravity ==========
+    # ========== Gravity ========== 
     gravity: [0.0, 0.0, 9.8]
+
+    # ========== IMU Calibration ==========
+    imu_calibrate: true           # 启动时标定 IMU 零偏
+    imu_calib_time: 1.5           # 标定时长（秒）
+    imu_acc_scale: 9.80665        # Livox IMU acceleration is reported in g; convert to m/s^2
 
     # ========== Keyframe Detection ==========
     kf_trans_thresh: 0.5        # meters
@@ -38,9 +43,9 @@ small_dlio_odom:
     gicp_max_correspondence_distance: 1.0
 
     # ========== Geometric Observer Gains ==========
-    geo_Kp: 1.0
-    geo_Kv: 1.0
-    geo_Kq: 1.0
-    geo_Ka: 1.0
+    geo_Kp: 4.5
+    geo_Kv: 11.25
+    geo_Kq: 4.0
+    geo_Ka: 2.25
     geo_Kg: 1.0
-    geo_b_max: 1.0
+    geo_b_max: 5.0

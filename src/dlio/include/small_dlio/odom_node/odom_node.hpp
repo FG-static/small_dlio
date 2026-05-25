@@ -49,8 +49,6 @@ namespace small_dlio {
         Eigen::Vector3d prev_acc_ = Eigen::Vector3d::Zero();
         Eigen::Vector3d prev_gyro_ = Eigen::Vector3d::Zero();
 
-        bool initialized_ = false;
-
         template <typename T>
         void declare_param(const std::string &name, T &param, const T &default_value) {
             this->declare_parameter(name, default_value);
@@ -58,6 +56,11 @@ namespace small_dlio {
         }
 
         void loadParams();
+
+        bool finalizeImuCalibration(
+            const Eigen::Vector3d &calib_acc_avg,
+            const Eigen::Vector3d &calib_gyro_avg
+        );
 
         // 分块核心函数
         bool motionCorrection(
@@ -115,7 +118,11 @@ namespace small_dlio {
             const double &t_point
         );
 
+        // Actually, the state data is:
+        // state_(k-1) -> state_(k; after integrateImu) -- if trigger callbackLivoxCloud --------┐
+        // state_(k) <- fused_state(after geometricFuser) <- imu_state(after motionCorrection) <-┘
         State state_;
+        State laser_scan_start_state_;
         Extrinsics extrinsics_;
         rclcpp::Time current_stamp_;
 
@@ -129,6 +136,19 @@ namespace small_dlio {
         std::string odom_frame_ = "odom";
         std::string body_frame_ = "body";
         std::string lidar_frame_ = "livox_frame";
+
+        // Imu Calibrate
+        bool imu_calibrate_ = true;
+        double imu_calib_time_ = 1.5;
+        double imu_acc_scale_ = 9.8;
+
+        bool imu_calibrated_ = false;
+        bool initialized_ = false;
+        double first_imu_stamp_;
+        Eigen::Vector3d calib_acc_sum_ = Eigen::Vector3d::Zero();
+        Eigen::Vector3d calib_gyro_sum_ = Eigen::Vector3d::Zero();
+        double calib_elapsed = 0;
+        int calib_samples = 0;
 
         // Submap
         int knn_limit_ = 5;
