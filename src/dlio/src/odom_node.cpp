@@ -51,6 +51,9 @@ namespace small_dlio {
         imu_opt.callback_group = imu_cb_group_;
         auto cloud_opt = rclcpp::SubscriptionOptions();
         cloud_opt.callback_group = cloud_cb_group_;
+        auto cloud_qos = rclcpp::QoS(rclcpp::KeepLast(1)); // ensure just 1 data
+        cloud_qos.best_effort();
+        cloud_qos.durability_volatile();
 
         sub_imu_ =
             create_subscription<sensor_msgs::msg::Imu>(
@@ -63,7 +66,7 @@ namespace small_dlio {
             );
         sub_cloud_ =
             create_subscription<livox_ros_driver2::msg::CustomMsg>(
-                cloud_topic_, rclcpp::SensorDataQoS(),
+                cloud_topic_, cloud_qos,
                 [this](livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
                  
                     callbackLivoxCloud(msg);
@@ -181,6 +184,7 @@ namespace small_dlio {
         const pcl::PointCloud<PointXYZIT>::Ptr &cloud_in,
         const State &prev_state,
         const double &scan_start_time,
+        const std::deque<ImuMeas> &imu_buffer,
         pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_out,
         State &state_end
     ) {
@@ -192,13 +196,14 @@ namespace small_dlio {
                   });
         
         state_end = prev_state;
+        auto imu_work = imu_buffer;
         cloud_out->clear();
         cloud_out->reserve(cloud_sorted.size());
 
         for (const auto &point : cloud_sorted) {
 
             double t_point = scan_start_time + point.offset_time;
-            if (!integrateImu(state_end, t_point)) {
+            if (!integrateImu(state_end, t_point, imu_work)) {
              
                 RCLCPP_WARN(get_logger(), "Failed to integrate IMU data at time %f", t_point);
                 continue;
@@ -223,6 +228,7 @@ namespace small_dlio {
 
     bool OdomNode::submapGeneration(
         const State &cur_state,
+        const std::vector<KeyFrame> &keyframes_snapshot,
         pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_submap
     ) const {
 
@@ -230,9 +236,9 @@ namespace small_dlio {
         
         // TODO: 临时使用kNN暴力匹配，后续换kdtree加速
         std::vector<std::pair<double, size_t>> dists;
-        for (size_t i = 0; i < keyframes_.size(); i ++) {
+        for (size_t i = 0; i < keyframes_snapshot.size(); i ++) {
 
-            double d = (keyframes_[i].pose.p - cur_state.pose.p).norm();
+            double d = (keyframes_snapshot[i].pose.p - cur_state.pose.p).norm();
             dists.emplace_back(d, i);
         }
         std::sort(dists.begin(), dists.end());
@@ -241,12 +247,10 @@ namespace small_dlio {
             RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
                 "submap kf[%zu]: dist=%.2f, cloud_size=%zu",
                 dists[i].second, dists[i].first,
-                keyframes_[dists[i].second].cloud ? keyframes_[dists[i].second].cloud->size() : 0);
+                keyframes_snapshot[dists[i].second].cloud ? keyframes_snapshot[dists[i].second].cloud->size() : 0);
             if (dists[i].first > max_distance_) break;
-            const auto &kf_cloud = keyframes_[dists[i].second].cloud;
-            if (kf_cloud && !kf_cloud->empty()) {
-                *cloud_submap += *kf_cloud;
-            }
+            const auto &kf_cloud = keyframes_snapshot[dists[i].second].cloud;
+            if (kf_cloud && !kf_cloud->empty()) *cloud_submap += *kf_cloud;
         }
 
         return true;
@@ -354,7 +358,8 @@ namespace small_dlio {
 
         fused_state = imu_state;
         fused_state.b_a = imu_state.b_a - dt * Ka_ * e_p_body;
-        fused_state.b_g = imu_state.b_g - dt * Kg_ * Eigen::Vector3d(q_e.x(), q_e.y(), q_e.z());
+        fused_state.b_g =
+            imu_state.b_g - dt * Kg_ * Eigen::Vector3d(q_e.x(), q_e.y(), q_e.z());
         fused_state.b_a = fused_state.b_a.cwiseMax(-b_max_).cwiseMin(b_max_);
         fused_state.b_g = fused_state.b_g.cwiseMax(-b_max_).cwiseMin(b_max_);
         fused_state.pose.p = imu_state.pose.p + dt * Kp_ * e_p;
@@ -455,40 +460,40 @@ namespace small_dlio {
 
     bool OdomNode::integrateImu(
         State &state_end,
-        const double &t_point
+        const double &t_point,
+        std::deque<ImuMeas> &imu_buffer
     ) {
 
-        if (!std::isfinite(t_point) || imu_data_.empty())
+        if (!std::isfinite(t_point) || imu_buffer.empty())
             return false;
 
         std::sort(
-            imu_data_.begin(), imu_data_.end(),
+            imu_buffer.begin(), imu_buffer.end(),
             [](const ImuMeas &a, const ImuMeas &b) {
                 return a.stamp < b.stamp;
             });
 
-        while (imu_data_.size() >= 2 && imu_data_[1].stamp <= t_point) {
+        while (imu_buffer.size() >= 2 && imu_buffer[1].stamp <= t_point) {
 
-            const ImuMeas &imu = imu_data_[0];
-            const double dt = imu_data_[1].stamp - imu_data_[0].stamp;
+            const ImuMeas &imu = imu_buffer[0];
+            const double dt = imu_buffer[1].stamp - imu_buffer[0].stamp;
             if (!integrateStep(state_end, imu, dt))
                 return false;
 
-            imu_data_.pop_front();
+            imu_buffer.pop_front();
         }
 
-        if (imu_data_.empty())
+        if (imu_buffer.empty())
             return true;
 
-        // handle the special point which between the 2 imu frames
-        const double dt = t_point - imu_data_.front().stamp;
+        const double dt = t_point - imu_buffer.front().stamp;
         if (dt <= 0.0)
             return true;
 
-        if (!integrateStep(state_end, imu_data_.front(), dt))
+        if (!integrateStep(state_end, imu_buffer.front(), dt))
             return false;
 
-        imu_data_.front().stamp = t_point;
+        imu_buffer.front().stamp = t_point;
         return true;
     }
 
@@ -649,15 +654,9 @@ PROPAGATION:
         const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg
     ) {
 
-        if (imu_calibrate_ && !imu_calibrated_) return;
-        std::lock_guard<std::mutex> lock(mtx_);
-
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
-            "callbackLivoxCloud triggered, imu_queue=%zu, keyframes=%zu",
-            imu_data_.size(), keyframes_.size());
-
         auto cloud = std::make_shared<pcl::PointCloud<PointXYZIT>>();
         cloud->reserve(msg->points.size());
+        double max_offset_time = 0.0;
 
         for (const auto &src : msg->points) {
 
@@ -672,73 +671,155 @@ PROPAGATION:
             dst.z = src.z;
             dst.intensity = static_cast<float>(src.reflectivity);
             dst.offset_time = static_cast<float>(src.offset_time) * 1e-9f;
+            max_offset_time = std::max(max_offset_time, static_cast<double>(dst.offset_time));
             cloud->push_back(dst);
         }
 
         if (cloud->empty())
             return;
 
-        double scan_start = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
-        double dt = scan_start - prev_scan_stamp_;
-        if (prev_scan_stamp_ == 0.0) {
+        // create a snapshot data
+        FrameSnapshot snapshot;
+        const rclcpp::Time stamp = msg->header.stamp;
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            if (imu_calibrate_ && !imu_calibrated_)
+                return;
 
-            prev_scan_stamp_ = scan_start;
-            return;
+            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
+                "callbackLivoxCloud triggered, imu_queue=%zu, keyframes=%zu",
+                imu_data_.size(), keyframes_.size());
+
+            snapshot.scan_start =
+                msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
+            snapshot.scan_dt = snapshot.scan_start - prev_scan_stamp_;
+            if (prev_scan_stamp_ == 0.0) {
+
+                prev_scan_stamp_ = snapshot.scan_start;
+                return;
+            }
+            prev_scan_stamp_ = snapshot.scan_start;
+
+            snapshot.scan_start_state = laser_scan_start_state_;
+            snapshot.submap_query_state = last_registered_state_;
+            snapshot.init_gicp = prev_T_gicp_;
+            snapshot.imu_buffer = imu_data_;
+            snapshot.keyframes = keyframes_;
         }
-        prev_scan_stamp_ = scan_start;
 
-        // deskew
+        const double scan_end_time = snapshot.scan_start + max_offset_time;
         auto cloud_deskewed = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
         State imu_state;
 
-        if (!motionCorrection(cloud, laser_scan_start_state_, scan_start, cloud_deskewed, imu_state) ||
+        // motionCorrection
+        if (!motionCorrection(
+                cloud, snapshot.scan_start_state, snapshot.scan_start,
+                snapshot.imu_buffer, cloud_deskewed, imu_state) ||
             cloud_deskewed->empty()) {
+
             RCLCPP_WARN(get_logger(), "motionCorrection failed or empty result");
             return;
         }
         RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
             "motionCorrection OK, deskewed=%zu points", cloud_deskewed->size());
 
-        // 发布去畸变点云（世界坐标系）
         sensor_msgs::msg::PointCloud2 cloud_msg;
         pcl::toROSMsg(*cloud_deskewed, cloud_msg);
-        cloud_msg.header.stamp = msg->header.stamp;
+        cloud_msg.header.stamp = stamp;
         cloud_msg.header.frame_id = odom_frame_;
         pub_cloud_->publish(cloud_msg);
 
-        if (keyframes_.empty()) {
+        /**
+         * @brief 帧结束收尾工作
+         * @param frame_state 目前点云回调内积分到的最新state
+         * @param update_registration 更新且注册状态
+         * @param keyframe_pose 注册到keyframe的pose
+         * @param cloud_aligned 对齐的点云
+         * @param alignment_score 对齐分数
+         * @param accepted_T_gicp 被接收的T_gicp，用于gicp初始位置猜测
+         * @return 无
+         */
+        auto commit_frame = [&](
+            const State &frame_state,
+            const bool update_registration,
+            const Pose *keyframe_pose,
+            const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_aligned,
+            const double alignment_score,
+            const Eigen::Matrix4d *accepted_T_gicp
+        ) {
 
-            state_ = imu_state;
-            laser_scan_start_state_ = state_;
-            last_registered_state_ = state_;
-            Pose first_pose = imu_state.pose;
-            auto cloud_aligned = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>(*cloud_deskewed);
-            keyframeDetection(first_pose, cloud_aligned, 0.0);
-            current_stamp_ = msg->header.stamp;
-            publishOdometry();
-            publishTf();
+            bool replay_ok = true;
+            {
+                std::lock_guard<std::mutex> lock(mtx_);
+                while (imu_data_.size() >= 2 && imu_data_[1].stamp <= scan_end_time) 
+                    imu_data_.pop_front();
+                if (!imu_data_.empty() && imu_data_.front().stamp < scan_end_time) 
+                    imu_data_.front().stamp = scan_end_time; // ?
+
+                state_ = frame_state;
+                if (!imu_data_.empty()) {
+
+                    std::deque<ImuMeas> live_imu = imu_data_;
+                    const double live_end_time = live_imu.back().stamp;
+                    if (live_end_time > scan_end_time) 
+                        replay_ok = integrateImu(state_, live_end_time, live_imu);
+                }
+
+                laser_scan_start_state_ = frame_state;
+                if (update_registration) {
+
+                    last_registered_state_ = frame_state;
+                    if (accepted_T_gicp) prev_T_gicp_ = *accepted_T_gicp;
+                    if (keyframe_pose && cloud_aligned) 
+                        keyframeDetection(*keyframe_pose, cloud_aligned, alignment_score);
+                }
+                current_stamp_ = stamp;
+            }
+
+            if (!replay_ok) {
+
+                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
+                    "Failed to replay post-scan IMU data from %.6f", scan_end_time);
+            }
+
+            publishOdometry(frame_state, stamp);
+            publishTf(frame_state, stamp);
+        };
+
+        if (snapshot.keyframes.empty()) {
+
+            auto cloud_aligned =
+                std::make_shared<pcl::PointCloud<pcl::PointXYZ>>(*cloud_deskewed);
+            const Pose first_pose = imu_state.pose;
+            commit_frame(imu_state, true, &first_pose, cloud_aligned, 0.0, nullptr);
             RCLCPP_INFO(get_logger(), "First keyframe published");
             return;
         }
-
-        // submapGeneration: use last_registered_state_ (snapshot from previous callback end)
+        
+        // submapGeneration
         auto submap = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-        submapGeneration(last_registered_state_, submap);
+        submapGeneration(snapshot.submap_query_state, snapshot.keyframes, submap);
 
         RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
             "submapGeneration: %zu points from %zu keyframes",
-            submap->size(), keyframes_.size());
+            submap->size(), snapshot.keyframes.size());
 
-        if (submap->empty())
+        if (submap->empty()) {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
+                "submapGeneration produced an empty submap, committed IMU-only state");
+            commit_frame(imu_state, false, nullptr, pcl::PointCloud<pcl::PointXYZ>::Ptr(), 0.0, nullptr);
             return;
+        }
 
-        // gicp
-        Eigen::Matrix4d T_gicp; // TODO: tomorrow remain to learn the reason about T_global
+        Eigen::Matrix4d T_gicp;
         double score;
 
-        if (!scanToMap(cloud_deskewed, submap, prev_T_gicp_, T_gicp, score)) {
-            
-            RCLCPP_WARN(get_logger(), "scanToMap failed");
+        // scanToMap
+        if (!scanToMap(cloud_deskewed, submap, snapshot.init_gicp, T_gicp, score)) {
+
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
+                "scanToMap failed, committed IMU-only state");
+            commit_frame(imu_state, false, nullptr, pcl::PointCloud<pcl::PointXYZ>::Ptr(), 0.0, nullptr);
             return;
         }
         RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
@@ -747,7 +828,9 @@ PROPAGATION:
         if (score >= max_alignment_score_) {
 
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
-                "GICP score %.4f >= threshold %.4f, skipping frame", score, max_alignment_score_);
+                "GICP score %.4f >= threshold %.4f, committed IMU-only state",
+                score, max_alignment_score_);
+            commit_frame(imu_state, false, nullptr, pcl::PointCloud<pcl::PointXYZ>::Ptr(), 0.0, nullptr);
             return;
         }
 
@@ -763,50 +846,42 @@ PROPAGATION:
 
         // geometricFuser
         State fused_state;
-        geometricFuser(imu_state, gicp_pose, dt, fused_state);
-        state_ = fused_state;
-        laser_scan_start_state_ = state_;
-        last_registered_state_ = state_;
+        geometricFuser(imu_state, gicp_pose, snapshot.scan_dt, fused_state);
 
-        // keyframeDetection: align cloud with GICP result before storing
-        Eigen::Matrix4d T_corr = T_gicp;
         auto cloud_aligned = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-        pcl::transformPointCloud(*cloud_deskewed, *cloud_aligned, T_corr.cast<float>());
-        keyframeDetection(gicp_pose, cloud_aligned, score);
+        pcl::transformPointCloud(*cloud_deskewed, *cloud_aligned, T_gicp.cast<float>());
 
-        // update prev_T_gicp_
-        if (score <= max_alignment_score_) prev_T_gicp_ = T_gicp;
-
-        // publish
-        current_stamp_ = msg->header.stamp;
-        publishOdometry();
-        publishTf();
+        // publish normal end
+        commit_frame(fused_state, true, &gicp_pose, cloud_aligned, score, &T_gicp);
 
         RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
             "Published odom, pos=[%.2f, %.2f, %.2f]",
-            state_.pose.p.x(), state_.pose.p.y(), state_.pose.p.z());
+            fused_state.pose.p.x(), fused_state.pose.p.y(), fused_state.pose.p.z());
     }
 
-    void OdomNode::publishOdometry() {
+    void OdomNode::publishOdometry(
+        const State &state,
+        const rclcpp::Time &stamp
+    ) {
 
         RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
             "publishOdometry called, pos=[%.2f, %.2f, %.2f]",
-            state_.pose.p.x(), state_.pose.p.y(), state_.pose.p.z());
+            state.pose.p.x(), state.pose.p.y(), state.pose.p.z());
 
         nav_msgs::msg::Odometry odom;
-        odom.header.stamp = current_stamp_;
+        odom.header.stamp = stamp;
         odom.header.frame_id = odom_frame_;
         odom.child_frame_id = body_frame_;
-        odom.pose.pose.orientation.w = state_.pose.q.w();
-        odom.pose.pose.orientation.x = state_.pose.q.x();
-        odom.pose.pose.orientation.y = state_.pose.q.y();
-        odom.pose.pose.orientation.z = state_.pose.q.z();
-        odom.pose.pose.position.x = state_.pose.p.x();
-        odom.pose.pose.position.y = state_.pose.p.y();
-        odom.pose.pose.position.z = state_.pose.p.z();
-        odom.twist.twist.linear.x = state_.v.x();
-        odom.twist.twist.linear.y = state_.v.y();
-        odom.twist.twist.linear.z = state_.v.z();
+        odom.pose.pose.orientation.w = state.pose.q.w();
+        odom.pose.pose.orientation.x = state.pose.q.x();
+        odom.pose.pose.orientation.y = state.pose.q.y();
+        odom.pose.pose.orientation.z = state.pose.q.z();
+        odom.pose.pose.position.x = state.pose.p.x();
+        odom.pose.pose.position.y = state.pose.p.y();
+        odom.pose.pose.position.z = state.pose.p.z();
+        odom.twist.twist.linear.x = state.v.x();
+        odom.twist.twist.linear.y = state.v.y();
+        odom.twist.twist.linear.z = state.v.z();
         pub_odom_->publish(odom);
 
         geometry_msgs::msg::PoseStamped pose;
@@ -819,20 +894,23 @@ PROPAGATION:
         pub_path_->publish(path_);
     }
 
-    void OdomNode::publishTf() {
+    void OdomNode::publishTf(
+        const State &state,
+        const rclcpp::Time &stamp
+    ) {
 
         // odom -> body (动态)
         geometry_msgs::msg::TransformStamped tf;
-        tf.header.stamp = current_stamp_;
+        tf.header.stamp = stamp;
         tf.header.frame_id = odom_frame_;
         tf.child_frame_id = body_frame_;
-        tf.transform.translation.x = state_.pose.p.x();
-        tf.transform.translation.y = state_.pose.p.y();
-        tf.transform.translation.z = state_.pose.p.z();
-        tf.transform.rotation.w = state_.pose.q.w();
-        tf.transform.rotation.x = state_.pose.q.x();
-        tf.transform.rotation.y = state_.pose.q.y();
-        tf.transform.rotation.z = state_.pose.q.z();
+        tf.transform.translation.x = state.pose.p.x();
+        tf.transform.translation.y = state.pose.p.y();
+        tf.transform.translation.z = state.pose.p.z();
+        tf.transform.rotation.w = state.pose.q.w();
+        tf.transform.rotation.x = state.pose.q.x();
+        tf.transform.rotation.y = state.pose.q.y();
+        tf.transform.rotation.z = state.pose.q.z();
         tf_broadcaster_->sendTransform(tf);
     }
 } // small_dlio

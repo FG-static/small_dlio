@@ -63,6 +63,17 @@ namespace small_dlio {
         Pose pose;
         pcl::PointCloud<pcl::PointXYZ>::Ptr cloud; // pc after deskew
     };
+
+    struct FrameSnapshot {
+            
+        State scan_start_state;
+        State submap_query_state;
+        Eigen::Matrix4d init_gicp = Eigen::Matrix4d::Identity();
+        std::deque<ImuMeas> imu_buffer;
+        std::vector<KeyFrame> keyframes;
+        double scan_start = 0.0;
+        double scan_dt = 0.0;
+    };
 } // small_dlio
 
 #endif

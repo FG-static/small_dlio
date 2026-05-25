@@ -22,8 +22,14 @@ namespace small_dlio {
             const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg
         );
 
-        void publishOdometry();
-        void publishTf();
+        void publishOdometry(
+            const State &state,
+            const rclcpp::Time &stamp
+        );
+        void publishTf(
+            const State &state,
+            const rclcpp::Time &stamp
+        );
 
         rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr
             sub_imu_;
@@ -67,6 +73,7 @@ namespace small_dlio {
             const pcl::PointCloud<PointXYZIT>::Ptr &cloud_in,
             const State &prev_state,
             const double &scan_start_time,
+            const std::deque<ImuMeas> &imu_buffer,
             pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_out,
             State &state_end
         );
@@ -79,6 +86,7 @@ namespace small_dlio {
 
         bool submapGeneration(
             const State &cur_state,
+            const std::vector<KeyFrame> &keyframes_snapshot,
             pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_submap
         ) const;
 
@@ -116,7 +124,8 @@ namespace small_dlio {
 
         bool integrateImu(
             State &state_end,
-            const double &t_point
+            const double &t_point,
+            std::deque<ImuMeas> &imu_buffer
         );
 
         // Actually, the state data is:
