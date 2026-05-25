@@ -35,12 +35,13 @@ small_dlio_odom:
     # ========== Submap (kNN) ==========
     knn_limit: 5
     max_distance: 20.0          # meters
+    log_throttle_ms: 10
 
     # ========== GICP ==========
-    gicp_leaf_size: 0.10        # voxel filter leaf size (m)
+    gicp_leaf_size: 0.25        # voxel filter leaf size (m)
     gicp_num_threads: 4
-    gicp_correspondence_randomness: 20
-    gicp_max_correspondence_distance: 1.0
+    gicp_correspondence_randomness: 16
+    gicp_max_correspondence_distance: 0.5
 
     # ========== Geometric Observer Gains ==========
     geo_Kp: 4.5

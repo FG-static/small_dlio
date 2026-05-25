@@ -85,6 +85,7 @@ namespace small_dlio {
         bool scanToMap(
             const pcl::PointCloud<pcl::PointXYZ>::Ptr &source_cloud,
             const pcl::PointCloud<pcl::PointXYZ>::Ptr &target_cloud,
+            const Eigen::Matrix4d &init_guess,
             Eigen::Matrix4d &trans_gicp,
             double &alignment_score
         ) const;
@@ -97,8 +98,8 @@ namespace small_dlio {
         ) const;
 
         bool keyframeDetection(
-            const State &fused_state,
-            const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_world,
+            const Pose &gicp_pose,
+            const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_aligned,
             const double alignment_score
         );
 
@@ -123,6 +124,7 @@ namespace small_dlio {
         // state_(k) <- fused_state(after geometricFuser) <- imu_state(after motionCorrection) <-┘
         State state_;
         State laser_scan_start_state_;
+        State last_registered_state_;
         Extrinsics extrinsics_;
         rclcpp::Time current_stamp_;
 
@@ -153,12 +155,14 @@ namespace small_dlio {
         // Submap
         int knn_limit_ = 5;
         double max_distance_ = 20.0;
+        int log_throttle_ms_ = 2000;
 
         // GICP
         double gicp_leaf_size_ = 0.10;
         int gicp_num_threads_ = 4;
         int gicp_correspondence_randomness_ = 20;
         double gicp_max_correspondence_distance_ = 1.0;
+        Eigen::Matrix4d prev_T_gicp_ = Eigen::Matrix4d::Identity();
 
         // Geometric observer
         double Kp_ = 1.0;

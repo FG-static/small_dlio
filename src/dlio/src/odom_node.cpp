@@ -26,6 +26,20 @@ namespace small_dlio {
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
         static_tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
 
+        // 静态 TF: body -> livox_frame (外参固定，只发一次)
+        geometry_msgs::msg::TransformStamped static_tf;
+        static_tf.header.stamp = now();
+        static_tf.header.frame_id = body_frame_;
+        static_tf.child_frame_id = lidar_frame_;
+        static_tf.transform.translation.x = extrinsics_.t_body_lidar.x();
+        static_tf.transform.translation.y = extrinsics_.t_body_lidar.y();
+        static_tf.transform.translation.z = extrinsics_.t_body_lidar.z();
+        static_tf.transform.rotation.w = extrinsics_.q_body_lidar.w();
+        static_tf.transform.rotation.x = extrinsics_.q_body_lidar.x();
+        static_tf.transform.rotation.y = extrinsics_.q_body_lidar.y();
+        static_tf.transform.rotation.z = extrinsics_.q_body_lidar.z();
+        static_tf_broadcaster_->sendTransform(static_tf);
+
         imu_cb_group_ = create_callback_group(
             rclcpp::CallbackGroupType::MutuallyExclusive
         );
@@ -74,19 +88,6 @@ namespace small_dlio {
                 "deskewed", 10
             );
 
-        // 静态 TF: body -> lidar
-        geometry_msgs::msg::TransformStamped static_tf;
-        static_tf.header.stamp = now();
-        static_tf.header.frame_id = body_frame_;
-        static_tf.child_frame_id = lidar_frame_;
-        static_tf.transform.translation.x = extrinsics_.t_body_lidar.x();
-        static_tf.transform.translation.y = extrinsics_.t_body_lidar.y();
-        static_tf.transform.translation.z = extrinsics_.t_body_lidar.z();
-        static_tf.transform.rotation.w = extrinsics_.q_body_lidar.w();
-        static_tf.transform.rotation.x = extrinsics_.q_body_lidar.x();
-        static_tf.transform.rotation.y = extrinsics_.q_body_lidar.y();
-        static_tf.transform.rotation.z = extrinsics_.q_body_lidar.z();
-        static_tf_broadcaster_->sendTransform(static_tf);
     }
 
     void OdomNode::loadParams() {
@@ -146,6 +147,7 @@ namespace small_dlio {
         // Submap
         declare_param("knn_limit", knn_limit_, 5);
         declare_param("max_distance", max_distance_, 20.0);
+        declare_param("log_throttle_ms", log_throttle_ms_, 2000);
 
         // GICP
         declare_param("gicp_leaf_size", gicp_leaf_size_, 0.10);
@@ -236,7 +238,7 @@ namespace small_dlio {
         std::sort(dists.begin(), dists.end());
         for (size_t i = 0; i < std::min(dists.size(), static_cast<size_t>(knn_limit_)); i ++) {
 
-            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
                 "submap kf[%zu]: dist=%.2f, cloud_size=%zu",
                 dists[i].second, dists[i].first,
                 keyframes_[dists[i].second].cloud ? keyframes_[dists[i].second].cloud->size() : 0);
@@ -253,6 +255,7 @@ namespace small_dlio {
     bool OdomNode::scanToMap(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr &source_cloud,
         const pcl::PointCloud<pcl::PointXYZ>::Ptr &target_cloud,
+        const Eigen::Matrix4d &init_guess,
         Eigen::Matrix4d &trans_gicp,
         double &alignment_score
     ) const {
@@ -291,15 +294,14 @@ namespace small_dlio {
         reg.setInputTarget(filtered_target);
 
         auto aligned = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-        Eigen::Matrix4f init_guess = Eigen::Matrix4f::Identity(); // TODO: 先单位阵，后期改为上一次猜测结果
 
         try {
 
-            reg.align(*aligned, init_guess);
+            reg.align(*aligned, init_guess.cast<float>());
         } catch (const std::exception &e) {
 
             RCLCPP_WARN_THROTTLE(
-                this->get_logger(), *this->get_clock(), 1000,
+                this->get_logger(), *this->get_clock(), log_throttle_ms_,
                 "GICP 配准异常，跳过本帧: %s", e.what());
             trans_gicp = Eigen::Matrix4d::Identity();
             alignment_score = 1e9;
@@ -313,7 +315,7 @@ namespace small_dlio {
             alignment_score = 1e9;
             trans_gicp = Eigen::Matrix4d::Identity();
             RCLCPP_WARN_THROTTLE(
-                this->get_logger(), *this->get_clock(), 1000,
+                this->get_logger(), *this->get_clock(), log_throttle_ms_,
                 "GICP 配准存在非法结果，跳过本帧");
             return false;
         }
@@ -364,22 +366,22 @@ namespace small_dlio {
     }
 
     bool OdomNode::keyframeDetection(
-        const State &fused_state,
-        const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_world,
+        const Pose &gicp_pose,
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_aligned,
         const double alignment_score
     ) {
 
-        if (!cloud_world || cloud_world->empty() ||
+        if (!cloud_aligned || cloud_aligned->empty() ||
             !std::isfinite(alignment_score) ||
             alignment_score > max_alignment_score_ ||
-            !fused_state.pose.p.allFinite() ||
-            !fused_state.pose.q.coeffs().allFinite()) 
+            !gicp_pose.p.allFinite() ||
+            !gicp_pose.q.coeffs().allFinite())
             return false;
 
         KeyFrame kf;
-        kf.pose = fused_state.pose;
+        kf.pose = gicp_pose;
         kf.pose.q.normalize();
-        kf.cloud.reset(new pcl::PointCloud<pcl::PointXYZ>(*cloud_world));
+        kf.cloud.reset(new pcl::PointCloud<pcl::PointXYZ>(*cloud_aligned));
 
         if (keyframes_.empty()) {
 
@@ -388,7 +390,7 @@ namespace small_dlio {
         }
 
         const KeyFrame &last_kf = keyframes_.back();
-        const double trans = (fused_state.pose.p - last_kf.pose.p).norm();
+        const double trans = (gicp_pose.p - last_kf.pose.p).norm();
 
         Eigen::Quaterniond dq =
             (last_kf.pose.q.conjugate() * kf.pose.q).normalized();
@@ -426,18 +428,22 @@ namespace small_dlio {
         const Eigen::Vector3d clean_gyro = imu.gyro - state.b_g;
         const Eigen::Vector3d clean_acc = imu.acc - state.b_a;
 
-        const Eigen::Vector3d world_gyro = q * clean_gyro;
-        const Eigen::Vector3d world_acc = q * clean_acc - gravity_;
-        (void)world_gyro;  // TODO: 后期看是否删除
+        // Transform from IMU frame to body frame
+        const Eigen::Vector3d body_gyro = extrinsics_.q_body_imu.conjugate() * clean_gyro;
+        const Eigen::Vector3d body_acc  = extrinsics_.q_body_imu.conjugate() * clean_acc;
+
+        const Eigen::Vector3d world_gyro = q * body_gyro;
+        const Eigen::Vector3d world_acc = q * body_acc - gravity_;
+        (void)world_gyro;
 
         state.pose.p += state.v * dt + 0.5 * world_acc * dt * dt;
         state.v += world_acc * dt;
 
         const Eigen::Quaterniond omega_body(
             0.0,
-            clean_gyro.x(),
-            clean_gyro.y(),
-            clean_gyro.z());
+            body_gyro.x(),
+            body_gyro.y(),
+            body_gyro.z());
         state.pose.q.coeffs() =
             q.coeffs() + 0.5 * dt * (q * omega_body).coeffs();
         state.pose.q.normalize();
@@ -646,7 +652,7 @@ PROPAGATION:
         if (imu_calibrate_ && !imu_calibrated_) return;
         std::lock_guard<std::mutex> lock(mtx_);
 
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
             "callbackLivoxCloud triggered, imu_queue=%zu, keyframes=%zu",
             imu_data_.size(), keyframes_.size());
 
@@ -690,7 +696,7 @@ PROPAGATION:
             RCLCPP_WARN(get_logger(), "motionCorrection failed or empty result");
             return;
         }
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
             "motionCorrection OK, deskewed=%zu points", cloud_deskewed->size());
 
         // 发布去畸变点云（世界坐标系）
@@ -704,7 +710,10 @@ PROPAGATION:
 
             state_ = imu_state;
             laser_scan_start_state_ = state_;
-            keyframeDetection(state_, cloud_deskewed, 0.0);
+            last_registered_state_ = state_;
+            Pose first_pose = imu_state.pose;
+            auto cloud_aligned = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>(*cloud_deskewed);
+            keyframeDetection(first_pose, cloud_aligned, 0.0);
             current_stamp_ = msg->header.stamp;
             publishOdometry();
             publishTf();
@@ -712,11 +721,11 @@ PROPAGATION:
             return;
         }
 
-        // submapGeneration: use state_ (fused_state from previous frame)
+        // submapGeneration: use last_registered_state_ (snapshot from previous callback end)
         auto submap = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-        submapGeneration(state_, submap);
+        submapGeneration(last_registered_state_, submap);
 
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
             "submapGeneration: %zu points from %zu keyframes",
             submap->size(), keyframes_.size());
 
@@ -727,12 +736,20 @@ PROPAGATION:
         Eigen::Matrix4d T_gicp; // TODO: tomorrow remain to learn the reason about T_global
         double score;
 
-        if (!scanToMap(cloud_deskewed, submap, T_gicp, score)) {
+        if (!scanToMap(cloud_deskewed, submap, prev_T_gicp_, T_gicp, score)) {
+            
             RCLCPP_WARN(get_logger(), "scanToMap failed");
             return;
         }
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
             "scanToMap OK, score=%.4f", score);
+
+        if (score >= max_alignment_score_) {
+
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
+                "GICP score %.4f >= threshold %.4f, skipping frame", score, max_alignment_score_);
+            return;
+        }
 
         Eigen::Matrix4d T_prior = Eigen::Matrix4d::Identity();
         T_prior.block<3, 3>(0, 0) = imu_state.pose.q.toRotationMatrix();
@@ -749,23 +766,30 @@ PROPAGATION:
         geometricFuser(imu_state, gicp_pose, dt, fused_state);
         state_ = fused_state;
         laser_scan_start_state_ = state_;
+        last_registered_state_ = state_;
 
-        // keyframeDetection
-        keyframeDetection(fused_state, cloud_deskewed, score);
+        // keyframeDetection: align cloud with GICP result before storing
+        Eigen::Matrix4d T_corr = T_gicp;
+        auto cloud_aligned = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        pcl::transformPointCloud(*cloud_deskewed, *cloud_aligned, T_corr.cast<float>());
+        keyframeDetection(gicp_pose, cloud_aligned, score);
+
+        // update prev_T_gicp_
+        if (score <= max_alignment_score_) prev_T_gicp_ = T_gicp;
 
         // publish
         current_stamp_ = msg->header.stamp;
         publishOdometry();
         publishTf();
 
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
             "Published odom, pos=[%.2f, %.2f, %.2f]",
             state_.pose.p.x(), state_.pose.p.y(), state_.pose.p.z());
     }
 
     void OdomNode::publishOdometry() {
 
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
             "publishOdometry called, pos=[%.2f, %.2f, %.2f]",
             state_.pose.p.x(), state_.pose.p.y(), state_.pose.p.z());
 
@@ -797,6 +821,7 @@ PROPAGATION:
 
     void OdomNode::publishTf() {
 
+        // odom -> body (动态)
         geometry_msgs::msg::TransformStamped tf;
         tf.header.stamp = current_stamp_;
         tf.header.frame_id = odom_frame_;
