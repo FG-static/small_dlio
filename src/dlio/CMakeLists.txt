@@ -22,6 +22,7 @@ find_package(livox_ros_driver2 REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common filters)
 find_package(small_gicp REQUIRED)
+find_package(OpenMP REQUIRED)
 
 add_executable(dlio_node
   src/main.cpp
@@ -52,6 +53,7 @@ target_link_libraries(dlio_node
   Eigen3::Eigen
   ${PCL_LIBRARIES}
   small_gicp::small_gicp
+  OpenMP::OpenMP_CXX
 )
 
 install(TARGETS dlio_node

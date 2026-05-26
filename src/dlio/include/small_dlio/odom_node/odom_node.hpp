@@ -30,6 +30,11 @@ namespace small_dlio {
             const State &state,
             const rclcpp::Time &stamp
         );
+        void publishPath(
+            const State &state,
+            const rclcpp::Time &stamp
+        );
+        void publishLiveState();
 
         rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr
             sub_imu_;
@@ -43,6 +48,7 @@ namespace small_dlio {
             pub_path_;
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
             pub_cloud_;
+        rclcpp::TimerBase::SharedPtr publish_timer_;
         std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
         std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
 
@@ -93,7 +99,7 @@ namespace small_dlio {
             const Eigen::Matrix4d &init_guess,
             Eigen::Matrix4d &trans_gicp,
             double &alignment_score
-        ) const;
+        );
 
         bool geometricFuser(
             const State &imu_state,
@@ -132,6 +138,8 @@ namespace small_dlio {
             std::deque<ImuMeas> &imu_buffer
         );
 
+        small_gicp::RegistrationPCL<pcl::PointXYZ, pcl::PointXYZ> reg_;
+
         // Actually, the state data is:
         // state_(k-1) -> state_(k; after integrateImu) -- if trigger callbackLivoxCloud --------┐
         // state_(k) <- fused_state(after geometricFuser) <- imu_state(after motionCorrection) <-┘
@@ -140,6 +148,7 @@ namespace small_dlio {
         State last_registered_state_;
         Extrinsics extrinsics_;
         rclcpp::Time current_stamp_;
+        rclcpp::Time latest_imu_stamp_;
 
         std::deque<ImuMeas> imu_data_;
         std::vector<KeyFrame> keyframes_;
