@@ -1143,7 +1143,8 @@ PROPAGATION:
 
         // geometricFuser
         State fused_state;
-        geometricFuser(imu_state, gicp_pose, snapshot.scan_dt, fused_state);
+        const double fuser_dt = scan_end_time - snapshot.scan_start;
+        geometricFuser(imu_state, gicp_pose, fuser_dt, fused_state);
 
         const auto imu_to_gicp = pose_delta(imu_state.pose, gicp_pose);
         const auto imu_to_fused = pose_delta(imu_state.pose, fused_state.pose);
@@ -1163,7 +1164,7 @@ PROPAGATION:
             "imu_v=[%.3f %.3f %.3f] fused_v=[%.3f %.3f %.3f] "
             "imu_ba=[%.3f %.3f %.3f] fused_ba=[%.3f %.3f %.3f] "
             "imu_bg=[%.3f %.3f %.3f] fused_bg=[%.3f %.3f %.3f]",
-            score, snapshot.scan_dt, scan_end_time - snapshot.scan_start, corr_trans, corr_rot,
+            score, fuser_dt, scan_end_time - snapshot.scan_start, corr_trans, corr_rot,
             T_prior(0, 3), T_prior(1, 3), T_prior(2, 3), prior_trans,
             T_global(0, 3), T_global(1, 3), T_global(2, 3), global_trans,
             imu_state.pose.p.x(), imu_state.pose.p.y(), imu_state.pose.p.z(),
