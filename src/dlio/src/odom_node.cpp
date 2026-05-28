@@ -214,6 +214,11 @@ namespace small_dlio {
         cloud_out->height = cloud_in->height;
         cloud_out->is_dense = false;
 
+        Eigen::Matrix4d T_body_lidar = Eigen::Matrix4d::Identity();
+        T_body_lidar.block<3, 3>(0, 0) =
+            extrinsics_.q_body_lidar.normalized().toRotationMatrix();
+        T_body_lidar.block<3, 1>(0, 3) = extrinsics_.t_body_lidar;
+
         // OpenMP
         #pragma omp parallel for num_threads(gicp_num_threads_) schedule(static)
         for (int i = 0; i < static_cast<int>(trajectory.samples.size()); ++ i) {
@@ -234,7 +239,7 @@ namespace small_dlio {
 
                 const auto &point = cloud_in->points[k];
                 Eigen::Vector4d point_lidar(point.x, point.y, point.z, 1.0);
-                Eigen::Vector4d point_world = T * point_lidar;
+                Eigen::Vector4d point_world = T * T_body_lidar * point_lidar;
 
                 pcl::PointXYZ p;
                 p.x = static_cast<float>(point_world.x());
@@ -264,10 +269,6 @@ namespace small_dlio {
         std::sort(dists.begin(), dists.end());
         for (size_t i = 0; i < std::min(dists.size(), static_cast<size_t>(knn_limit_)); i ++) {
 
-            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
-                "submap kf[%zu]: dist=%.2f, cloud_size=%zu",
-                dists[i].second, dists[i].first,
-                keyframes_snapshot[dists[i].second].cloud ? keyframes_snapshot[dists[i].second].cloud->size() : 0);
             if (dists[i].first > max_distance_) break;
             const auto &kf_cloud = keyframes_snapshot[dists[i].second].cloud;
             if (kf_cloud && !kf_cloud->empty()) *cloud_submap += *kf_cloud;
@@ -300,30 +301,6 @@ namespace small_dlio {
         try {
 
             reg_.align(*aligned, init_guess.cast<float>());
-
-            // debug
-            const auto &result = reg_.getRegistrationResult();
-
-            Eigen::Matrix4d T = reg_.getFinalTransformation().cast<double>();
-            double trans_norm = T.block<3, 1>(0, 3).norm();
-
-            Eigen::Matrix3d R = T.block<3, 3>(0, 0);
-            double rot_angle = Eigen::AngleAxisd(R).angle();
-
-            RCLCPP_INFO(
-                get_logger(),
-                "GICP debug: source=%zu target=%zu converged=%d iter=%zu inliers=%zu "
-                "result_error=%.6f fitness=%.6f trans=%.3f rot_deg=%.2f",
-                source_cloud->size(),
-                target_cloud->size(),
-                result.converged,
-                result.iterations,
-                result.num_inliers,
-                result.error,
-                reg_.getFitnessScore(),
-                trans_norm,
-                rot_angle * 180.0 / M_PI
-            );
         } catch (const std::exception &e) {
 
             RCLCPP_WARN_THROTTLE(
@@ -787,12 +764,6 @@ PROPAGATION:
     void OdomNode::callbackLivoxCloud(
         const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg
     ) {
-
-        const auto t_total_start = std::chrono::steady_clock::now();
-        auto t_stage = t_total_start;
-        auto elapsed_ms = [](const auto &start, const auto &end) {
-            return std::chrono::duration<double, std::milli>(end - start).count();
-        };
         auto pose_delta = [](const Pose &from, const Pose &to) {
             Eigen::Quaterniond dq = (from.q.conjugate() * to.q).normalized();
             if (dq.w() < 0.0)
@@ -800,23 +771,6 @@ PROPAGATION:
             return std::make_pair(
                 (to.p - from.p).norm(),
                 Eigen::AngleAxisd(dq).angle() * 180.0 / M_PI);
-        };
-        auto planar_angle_deg = [](const Eigen::Vector3d &a, const Eigen::Vector3d &b) {
-            Eigen::Vector2d a_xy(a.x(), a.y());
-            Eigen::Vector2d b_xy(b.x(), b.y());
-            const double a_norm = a_xy.norm();
-            const double b_norm = b_xy.norm();
-            if (a_norm < 1e-6 || b_norm < 1e-6)
-                return -1.0;
-
-            double cos_theta = a_xy.dot(b_xy) / (a_norm * b_norm);
-            cos_theta = std::max(-1.0, std::min(1.0, cos_theta));
-            return std::acos(cos_theta) * 180.0 / M_PI;
-        };
-        auto planar_yaw_deg = [](const Eigen::Vector3d &v) {
-            if (std::hypot(v.x(), v.y()) < 1e-6)
-                return -1.0;
-            return std::atan2(v.y(), v.x()) * 180.0 / M_PI;
         };
 
         auto cloud = std::make_shared<pcl::PointCloud<PointXYZIT>>();
@@ -840,10 +794,6 @@ PROPAGATION:
         if (cloud->empty())
             return;
 
-        const auto t_convert_done = std::chrono::steady_clock::now();
-        const double convert_ms = elapsed_ms(t_stage, t_convert_done);
-        t_stage = t_convert_done;
-
         // create a snapshot data
         FrameSnapshot snapshot;
         const rclcpp::Time stamp = msg->header.stamp;
@@ -851,10 +801,6 @@ PROPAGATION:
             std::lock_guard<std::mutex> lock(mtx_);
             if (imu_calibrate_ && !imu_calibrated_)
                 return;
-
-            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
-                "callbackLivoxCloud triggered, imu_queue=%zu, keyframes=%zu",
-                imu_data_.size(), keyframes_.size());
 
             snapshot.scan_start =
                 msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
@@ -872,10 +818,6 @@ PROPAGATION:
             snapshot.imu_buffer = imu_data_;
             snapshot.keyframes = keyframes_;
         }
-
-        const auto t_snapshot_done = std::chrono::steady_clock::now();
-        const double snapshot_ms = elapsed_ms(t_stage, t_snapshot_done);
-        t_stage = t_snapshot_done;
 
         std::sort(
             cloud->points.begin(), cloud->points.end(),
@@ -933,10 +875,6 @@ PROPAGATION:
         const double frame_dt = frame_ref_time - snapshot.prev_ref_stamp;
         snapshot.scan_dt = frame_dt;
 
-        const auto t_trajectory_done = std::chrono::steady_clock::now();
-        const double trajectory_ms = elapsed_ms(t_stage, t_trajectory_done);
-        t_stage = t_trajectory_done;
-
         auto cloud_deskewed = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
         State imu_state = trajectory.samples[frame_ref_index].state;
 
@@ -947,12 +885,6 @@ PROPAGATION:
             RCLCPP_WARN(get_logger(), "motionCorrection failed or empty result");
             return;
         }
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
-            "motionCorrection OK, deskewed=%zu points", cloud_deskewed->size());
-
-        const auto t_deskew_done = std::chrono::steady_clock::now();
-        const double deskew_ms = elapsed_ms(t_stage, t_deskew_done);
-        t_stage = t_deskew_done;
 
         pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
         voxel_filter.setLeafSize(
@@ -969,19 +901,11 @@ PROPAGATION:
             return;
         }
 
-        const auto t_filter_done = std::chrono::steady_clock::now();
-        const double filter_ms = elapsed_ms(t_stage, t_filter_done);
-        t_stage = t_filter_done;
-
         sensor_msgs::msg::PointCloud2 cloud_msg;
         pcl::toROSMsg(*cloud_deskewed, cloud_msg);
         cloud_msg.header.stamp = stamp;
         cloud_msg.header.frame_id = odom_frame_;
         pub_cloud_->publish(cloud_msg);
-
-        const auto t_publish_cloud_done = std::chrono::steady_clock::now();
-        const double publish_cloud_ms = elapsed_ms(t_stage, t_publish_cloud_done);
-        t_stage = t_publish_cloud_done;
 
         /**
          * @brief 帧结束收尾工作
@@ -1004,30 +928,12 @@ PROPAGATION:
 
             bool replay_ok = true;
             bool keyframe_added = false;
-            State live_before_commit;
-            State live_after_replay;
-            double live_before_stamp = 0.0;
-            double live_after_stamp = 0.0;
-            double imu_front_before = 0.0;
-            double imu_back_before = 0.0;
-            size_t imu_size_before = 0;
-            size_t imu_size_after_trim = 0;
             {
                 std::lock_guard<std::mutex> lock(mtx_);
-                live_before_commit = state_;
-                live_before_stamp = latest_imu_stamp_.nanoseconds() > 0 ?
-                    latest_imu_stamp_.seconds() : prev_imu_stamp_;
-                imu_size_before = imu_data_.size();
-                if (!imu_data_.empty()) {
-                    imu_front_before = imu_data_.front().stamp;
-                    imu_back_before = imu_data_.back().stamp;
-                }
-
                 while (imu_data_.size() >= 2 && imu_data_[1].stamp <= frame_ref_time) 
                     imu_data_.pop_front();
                 if (!imu_data_.empty() && imu_data_.front().stamp < frame_ref_time) 
                     imu_data_.front().stamp = frame_ref_time;
-                imu_size_after_trim = imu_data_.size();
 
                 state_ = frame_state;
                 if (!imu_data_.empty()) {
@@ -1037,8 +943,6 @@ PROPAGATION:
                     if (live_end_time > frame_ref_time) 
                         replay_ok = integrateImu(state_, live_end_time, live_imu);
                 }
-                live_after_replay = state_;
-                live_after_stamp = !imu_data_.empty() ? imu_data_.back().stamp : frame_ref_time;
 
                 laser_scan_start_state_ = frame_state;
                 prev_scan_stamp_ = frame_ref_time;
@@ -1061,53 +965,6 @@ PROPAGATION:
                 RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
                     "Failed to replay post-frame IMU data from %.6f", frame_ref_time);
             }
-
-            const auto live_to_frame = pose_delta(live_before_commit.pose, frame_state.pose);
-            const auto frame_to_replay = pose_delta(frame_state.pose, live_after_replay.pose);
-            const auto live_to_replay = pose_delta(live_before_commit.pose, live_after_replay.pose);
-
-            Eigen::Vector3d path_tangent = Eigen::Vector3d::Zero();
-            if (!path_.poses.empty()) {
-                const auto &prev_pose = path_.poses.back().pose.position;
-                path_tangent =
-                    frame_state.pose.p -
-                    Eigen::Vector3d(prev_pose.x, prev_pose.y, prev_pose.z);
-            }
-            const Eigen::Vector3d heading_world =
-                frame_state.pose.q.normalized() * Eigen::Vector3d::UnitX();
-            const double tangent_norm_xy = std::hypot(path_tangent.x(), path_tangent.y());
-            const double vel_norm_xy = std::hypot(frame_state.v.x(), frame_state.v.y());
-            const double heading_path_deg = planar_angle_deg(heading_world, path_tangent);
-            const double vel_path_deg = planar_angle_deg(frame_state.v, path_tangent);
-            const double vel_heading_deg = planar_angle_deg(frame_state.v, heading_world);
-            const double tangent_yaw_deg = planar_yaw_deg(path_tangent);
-            const double vel_yaw_deg = planar_yaw_deg(frame_state.v);
-            const double heading_yaw_deg = planar_yaw_deg(heading_world);
-
-            RCLCPP_INFO(
-                get_logger(),
-                "commit debug: update_reg=%d score=%.4f scan_start=%.6f scan_ref=%.6f scan_end=%.6f "
-                "scan_frame_dt=%.6f scan_span=%.6f "
-                "live_before_stamp=%.6f live_after_stamp=%.6f post_ref_dt=%.6f "
-                "imu_queue_before=%zu after_trim=%zu imu_front=%.6f imu_back=%.6f "
-                "live_before=[%.3f %.3f %.3f] frame=[%.3f %.3f %.3f] replay=[%.3f %.3f %.3f] "
-                "live_to_frame_dp=%.3f dr=%.2f frame_to_replay_dp=%.3f dr=%.2f live_to_replay_dp=%.3f dr=%.2f "
-                "path_xy=%.3f vel_xy=%.3f heading_path_deg=%.2f vel_path_deg=%.2f vel_heading_deg=%.2f "
-                "yaw_path=%.2f yaw_vel=%.2f yaw_heading=%.2f",
-                update_registration, alignment_score,
-                snapshot.scan_start, frame_ref_time, scan_end_time,
-                snapshot.scan_dt, scan_end_time - snapshot.scan_start,
-                live_before_stamp, live_after_stamp, live_after_stamp - frame_ref_time,
-                imu_size_before, imu_size_after_trim, imu_front_before, imu_back_before,
-                live_before_commit.pose.p.x(), live_before_commit.pose.p.y(), live_before_commit.pose.p.z(),
-                frame_state.pose.p.x(), frame_state.pose.p.y(), frame_state.pose.p.z(),
-                live_after_replay.pose.p.x(), live_after_replay.pose.p.y(), live_after_replay.pose.p.z(),
-                live_to_frame.first, live_to_frame.second,
-                frame_to_replay.first, frame_to_replay.second,
-                live_to_replay.first, live_to_replay.second,
-                tangent_norm_xy, vel_norm_xy,
-                heading_path_deg, vel_path_deg, vel_heading_deg,
-                tangent_yaw_deg, vel_yaw_deg, heading_yaw_deg);
             publishPath(frame_state, stamp);
         };
 
@@ -1125,27 +982,11 @@ PROPAGATION:
         auto submap = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
         submapGeneration(snapshot.submap_query_state, snapshot.keyframes, submap);
 
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
-            "submapGeneration: %zu points from %zu keyframes",
-            submap->size(), snapshot.keyframes.size());
-
-        const auto t_submap_done = std::chrono::steady_clock::now();
-        const double submap_ms = elapsed_ms(t_stage, t_submap_done);
-        t_stage = t_submap_done;
-
         if (submap->empty()) {
 
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
                 "submapGeneration produced an empty submap, committed IMU-only state");
             commit_frame(imu_state, false, nullptr, pcl::PointCloud<pcl::PointXYZ>::Ptr(), 0.0, nullptr);
-            const auto t_commit_done = std::chrono::steady_clock::now();
-            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
-                "timing ms: convert=%.1f snapshot=%.1f trajectory=%.1f deskew=%.1f "
-                "filter=%.1f publish_cloud=%.1f submap=%.1f gicp=%.1f commit=%.1f total=%.1f",
-                convert_ms, snapshot_ms, trajectory_ms, deskew_ms,
-                filter_ms, publish_cloud_ms, submap_ms, 0.0,
-                elapsed_ms(t_submap_done, t_commit_done),
-                elapsed_ms(t_total_start, t_commit_done));
             return;
         }
 
@@ -1158,22 +999,8 @@ PROPAGATION:
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
                 "scanToMap failed, committed IMU-only state");
             commit_frame(imu_state, false, nullptr, pcl::PointCloud<pcl::PointXYZ>::Ptr(), 0.0, nullptr);
-            const auto t_commit_done = std::chrono::steady_clock::now();
-            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
-                "timing ms: convert=%.1f snapshot=%.1f trajectory=%.1f deskew=%.1f "
-                "filter=%.1f publish_cloud=%.1f submap=%.1f gicp=%.1f commit=%.1f total=%.1f",
-                convert_ms, snapshot_ms, trajectory_ms, deskew_ms,
-                filter_ms, publish_cloud_ms, submap_ms,
-                elapsed_ms(t_stage, t_commit_done), 0.0,
-                elapsed_ms(t_total_start, t_commit_done));
             return;
         }
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
-            "scanToMap OK, score=%.4f", score);
-
-        const auto t_gicp_done = std::chrono::steady_clock::now();
-        const double gicp_ms = elapsed_ms(t_stage, t_gicp_done);
-        t_stage = t_gicp_done;
 
         Eigen::Matrix4d T_prior = Eigen::Matrix4d::Identity();
         T_prior.block<3, 3>(0, 0) = imu_state.pose.q.toRotationMatrix();
@@ -1207,14 +1034,6 @@ PROPAGATION:
                 "GICP score %.4f >= threshold %.4f, committed IMU-only state",
                 score, max_alignment_score_);
             commit_frame(imu_state, false, nullptr, pcl::PointCloud<pcl::PointXYZ>::Ptr(), 0.0, nullptr);
-            const auto t_commit_done = std::chrono::steady_clock::now();
-            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
-                "timing ms: convert=%.1f snapshot=%.1f trajectory=%.1f deskew=%.1f "
-                "filter=%.1f publish_cloud=%.1f submap=%.1f gicp=%.1f commit=%.1f total=%.1f",
-                convert_ms, snapshot_ms, trajectory_ms, deskew_ms,
-                filter_ms, publish_cloud_ms, submap_ms, gicp_ms,
-                elapsed_ms(t_gicp_done, t_commit_done),
-                elapsed_ms(t_total_start, t_commit_done));
             return;
         }
 
@@ -1261,20 +1080,6 @@ PROPAGATION:
 
         // publish normal end
         commit_frame(fused_state, true, &gicp_pose, cloud_aligned, score, &T_corr);
-
-        const auto t_commit_done = std::chrono::steady_clock::now();
-        const double commit_ms = elapsed_ms(t_stage, t_commit_done);
-        const double total_ms = elapsed_ms(t_total_start, t_commit_done);
-
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
-            "timing ms: convert=%.1f snapshot=%.1f trajectory=%.1f deskew=%.1f "
-            "filter=%.1f publish_cloud=%.1f submap=%.1f gicp=%.1f commit=%.1f total=%.1f",
-            convert_ms, snapshot_ms, trajectory_ms, deskew_ms,
-            filter_ms, publish_cloud_ms, submap_ms, gicp_ms, commit_ms, total_ms);
-
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
-            "Published odom, pos=[%.2f, %.2f, %.2f]",
-            fused_state.pose.p.x(), fused_state.pose.p.y(), fused_state.pose.p.z());
 
         RCLCPP_INFO(
             get_logger(),

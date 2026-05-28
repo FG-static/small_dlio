@@ -28,8 +28,8 @@ small_dlio_odom:
     imu_acc_scale: 9.80665        # Livox IMU acceleration is reported in g; convert to m/s^2
 
     # ========== Keyframe Detection ==========
-    kf_trans_thresh: 0.5        # meters
-    kf_rot_thresh: 0.1745       # radians (~10 deg)
+    kf_trans_thresh: 0.05        # meters
+    kf_rot_thresh: 0.08725       # radians (~5 deg)
     max_alignment_score: 1.0
 
     # ========== Submap (kNN) ==========
