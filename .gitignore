@@ -12,4 +12,3 @@ compile_commands.json
 .clangd
 LeLeMc2010_quadrotor.pdf
 [2203.03749] Direct LiDAR-Inertial Odometry_ Lightweight LIO with Continuous-Time Motion Correction.pdf
-.gitignore
