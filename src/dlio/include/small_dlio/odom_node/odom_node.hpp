@@ -34,6 +34,10 @@ namespace small_dlio {
             const State &state,
             const rclcpp::Time &stamp
         );
+        void publishKeyframeCloud(
+            const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
+            const rclcpp::Time &stamp
+        );
         void publishLiveState();
 
         rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr
@@ -48,6 +52,8 @@ namespace small_dlio {
             pub_path_;
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
             pub_cloud_;
+        rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
+            pub_keyframe_cloud_;
         rclcpp::TimerBase::SharedPtr publish_timer_;
         std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
         std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
@@ -121,6 +127,7 @@ namespace small_dlio {
 
         bool buildTrajectory(
             const State &start_state,
+            const double start_time,
             const std::deque<ImuMeas> &imu_buffer,
             const std::vector<double> &timestamps,
             FrameTrajectory &trajectory

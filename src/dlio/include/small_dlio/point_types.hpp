@@ -72,6 +72,7 @@ namespace small_dlio {
         std::deque<ImuMeas> imu_buffer;
         std::vector<KeyFrame> keyframes;
         double scan_start = 0.0;
+        double prev_ref_stamp = 0.0;
         double scan_dt = 0.0;
     };
 
