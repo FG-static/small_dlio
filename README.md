@@ -5,20 +5,23 @@
 当前仓库包含：
 
 - `OdomNode`：IMU 预积分、点云去畸变、submap 构建、GICP 配准、状态发布
-- `MapNode`：订阅 keyframe 点云并在线累积发布全局地图的初版节点
+- `MapNode`：订阅 keyframe 点云、体素滤波、在线累积并发布全局地图，支持手动保存 PCD
 
 ## 当前状态
 
-目前工程重点仍是里程计主链路，建图节点是初版实现，已经可以：
+目前工程重点仍是里程计主链路，建图部分已经具备基础在线建图能力，当前支持：
 
 - 订阅 `/keyframe`
+- 对每帧 keyframe 做 voxel filter
 - 累积 keyframe 点云
 - 发布 `/global_map`
+- 通过 `/save_map` service 保存当前全局地图为 PCD
+- 使用保存下来的 `global_map.pcd` 离线渲染地图图片
 
 但还没有做完整的地图管理能力，例如：
 
-- 全局地图降采样更新策略
-- 地图保存/加载
+- 全局地图的二次重采样或分层管理
+- 地图加载与重发布
 - 分块地图或局部地图裁剪
 - 后台优化/回环
 
@@ -106,6 +109,10 @@ ros2 launch dlio full.launch.py rviz:=true
 - `/deskewed`
 - `/global_map`
 
+### Service
+
+- `/save_map`：保存当前 `global_map_` 到 PCD
+
 ## 关键参数
 
 配置文件位置：
@@ -119,7 +126,23 @@ ros2 launch dlio full.launch.py rviz:=true
 - `max_alignment_score`：GICP 接受阈值
 - `gicp_leaf_size`：配准前点云降采样体素大小
 - `gicp_num_threads`：GICP 线程数
-- `map_leaf_size`：地图体素参数，当前建图节点尚未完整使用
+- `map_leaf_size`：`MapNode` 对 keyframe 做体素滤波时使用的 leaf size
+- `save_map_service_name`：地图保存 service 名称
+- `map_save_path`：PCD 默认保存路径
+
+## 保存地图
+
+运行过程中可以手动调用：
+
+```bash
+ros2 service call /save_map std_srvs/srv/Trigger {}
+```
+
+默认会把地图保存到：
+
+```text
+/home/goose/small_dlio/global_map.pcd
+```
 
 ## 可视化检查
 
@@ -142,8 +165,8 @@ ros2 launch dlio full.launch.py rviz:=true
 
 ## 后续待做
 
-- 为 `MapNode` 加入 voxel filter，避免全局地图无限膨胀
-- 增加地图保存服务
+- 对 `global_map_` 增加全局重滤波或分块管理，控制地图规模
 - 增加地图加载与重发布能力
 - 将 odom / map 节点进一步解耦
+- 为保存地图增加可配置输出格式或保存前重采样选项
 - 评估是否引入回环或离线建图流程
