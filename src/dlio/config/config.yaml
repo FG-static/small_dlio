@@ -1,52 +1,56 @@
 small_dlio_odom:
-  ros__parameters:
+    ros__parameters:
+        # ========== Frame IDs ==========
+        odom_frame: "odom"
+        body_frame: "body"
+        lidar_frame: "livox_frame"
 
-    # ========== Frame IDs ==========
-    odom_frame: "odom"
-    body_frame: "body"
-    lidar_frame: "livox_frame"
+        # ========== Topics ==========
+        imu_topic: "/livox/imu"
+        cloud_topic: "/livox/lidar"
 
-    # ========== Topics ==========
-    imu_topic: "/livox/imu"
-    cloud_topic: "/livox/lidar"
+        # ========== Extrinsics ==========
+        # body -> IMU
+        t_body_imu: [0.0, 0.0, 0.0]
+        q_body_imu: [1.0, 0.0, 0.0, 0.0] # w, x, y, z
 
-    # ========== Extrinsics ==========
-    # body -> IMU
-    t_body_imu: [0.0, 0.0, 0.0]
-    q_body_imu: [1.0, 0.0, 0.0, 0.0]  # w, x, y, z
+        # body -> LiDAR
+        t_body_lidar: [0.0, 0.0, 0.0]
+        q_body_lidar: [1.0, 0.0, 0.0, 0.0]
 
-    # body -> LiDAR
-    t_body_lidar: [0.0, 0.0, 0.0]
-    q_body_lidar: [1.0, 0.0, 0.0, 0.0]
+        # ========== Gravity ==========
+        gravity: [0.0, 0.0, 9.8]
 
-    # ========== Gravity ========== 
-    gravity: [0.0, 0.0, 9.8]
+        # ========== IMU Calibration ==========
+        imu_calibrate: true # 启动时标定 IMU 零偏
+        imu_calib_time: 1.5 # 标定时长（秒）
+        imu_acc_scale: 9.80665 # Livox IMU acceleration is reported in g; convert to m/s^2
 
-    # ========== IMU Calibration ==========
-    imu_calibrate: true           # 启动时标定 IMU 零偏
-    imu_calib_time: 1.5           # 标定时长（秒）
-    imu_acc_scale: 9.80665        # Livox IMU acceleration is reported in g; convert to m/s^2
+        # ========== Keyframe Detection ==========
+        kf_trans_thresh: 0.05 # meters
+        kf_rot_thresh: 0.08725 # radians (~5 deg)
+        max_alignment_score: 1.0
 
-    # ========== Keyframe Detection ==========
-    kf_trans_thresh: 0.05        # meters
-    kf_rot_thresh: 0.08725       # radians (~5 deg)
-    max_alignment_score: 1.0
+        # ========== Submap (kNN) ==========
+        knn_limit: 5
+        max_distance: 20.0 # meters
+        log_throttle_ms: 10
 
-    # ========== Submap (kNN) ==========
-    knn_limit: 5
-    max_distance: 20.0          # meters
-    log_throttle_ms: 10
+        # ========== GICP ==========
+        gicp_leaf_size: 0.25 # voxel filter leaf size (m)
+        gicp_num_threads: 4
+        gicp_correspondence_randomness: 16
+        gicp_max_correspondence_distance: 0.5
 
-    # ========== GICP ==========
-    gicp_leaf_size: 0.25        # voxel filter leaf size (m)
-    gicp_num_threads: 4
-    gicp_correspondence_randomness: 16
-    gicp_max_correspondence_distance: 0.5
+        # ========== Geometric Observer Gains ==========
+        geo_Kp: 4.5
+        geo_Kv: 11.25
+        geo_Kq: 4.0
+        geo_Ka: 2.25
+        geo_Kg: 1.0
+        geo_b_max: 5.0
 
-    # ========== Geometric Observer Gains ==========
-    geo_Kp: 4.5
-    geo_Kv: 11.25
-    geo_Kq: 4.0
-    geo_Ka: 2.25
-    geo_Kg: 1.0
-    geo_b_max: 5.0
+        # ========== Map ==========
+        map_leaf_size: 0.55
+        map_topic: "/global_map"
+        keyframe_topic: "/keyframe"

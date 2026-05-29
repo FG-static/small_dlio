@@ -30,6 +30,7 @@ find_package(OpenMP REQUIRED)
 
 add_executable(dlio_node
   src/main.cpp
+  src/map_node.cpp
   src/odom_node.cpp
 )
 
