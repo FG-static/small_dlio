@@ -87,12 +87,6 @@ namespace small_dlio {
             pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_out
         ) const;
 
-        // TODO: maybe remove
-        bool optimizationPrior(
-            const State &state,
-            Eigen::Matrix4d &trans_lidar_to_world
-        ) const;
-
         bool submapGeneration(
             const State &cur_state,
             const std::vector<KeyFrame> &keyframes_snapshot,
