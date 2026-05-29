@@ -1,5 +1,6 @@
 .vscode/
 .claude/
+docs/
 
 build/
 install/
@@ -8,6 +9,7 @@ log/
 .DS_Store
 
 AGENTS.md
+global_map.pcd
 compile_commands.json
 .clangd
 LeLeMc2010_quadrotor.pdf

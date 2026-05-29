@@ -54,3 +54,11 @@ small_dlio_odom:
         map_leaf_size: 0.55
         map_topic: "/global_map"
         keyframe_topic: "/keyframe"
+
+map_node:
+    ros__parameters:
+        map_leaf_size: 0.55
+        map_topic: "/global_map"
+        keyframe_topic: "/keyframe"
+        save_map_service_name: "/save_map"
+        map_save_path: "/home/goose/small_dlio/global_map.pcd"
