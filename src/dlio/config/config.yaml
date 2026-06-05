@@ -28,7 +28,7 @@ small_dlio_odom:
 
         # ========== Keyframe Detection ==========
         kf_trans_thresh: 0.05 # meters
-        kf_rot_thresh: 0.08725 # radians (~5 deg)
+        kf_rot_thresh: 0.045 # radians (~2.5 deg)
         max_alignment_score: 1.0
 
         # ========== Submap (kNN) ==========
@@ -37,9 +37,9 @@ small_dlio_odom:
         log_throttle_ms: 10
 
         # ========== GICP ==========
-        gicp_leaf_size: 0.25 # voxel filter leaf size (m)
+        gicp_leaf_size: 0.2 # voxel filter leaf size (m)
         gicp_num_threads: 4
-        gicp_correspondence_randomness: 16
+        gicp_correspondence_randomness: 20
         gicp_max_correspondence_distance: 0.5
 
         # ========== Geometric Observer Gains ==========

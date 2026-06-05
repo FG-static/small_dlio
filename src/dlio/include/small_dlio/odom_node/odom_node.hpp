@@ -5,6 +5,8 @@
 #include "point_types.hpp"
 #include "rclcpp/time.hpp"
 
+#include <pcl/kdtree/kdtree_flann.h>
+
 namespace small_dlio {
 
     class OdomNode : public rclcpp::Node {
@@ -90,6 +92,7 @@ namespace small_dlio {
         bool submapGeneration(
             const State &cur_state,
             const std::vector<KeyFrame> &keyframes_snapshot,
+            const size_t source_point_count,
             pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_submap
         ) const;
 
@@ -153,6 +156,8 @@ namespace small_dlio {
 
         std::deque<ImuMeas> imu_data_;
         std::vector<KeyFrame> keyframes_;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr keyframe_positions_;
+        pcl::KdTreeFLANN<pcl::PointXYZ>::Ptr keyframe_kdtree_;
         nav_msgs::msg::Path path_;
 
         // Topics & frames

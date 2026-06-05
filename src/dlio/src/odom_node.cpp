@@ -29,6 +29,8 @@ namespace small_dlio {
         state_.b_a.setZero();
         state_.b_g.setZero();
         laser_scan_start_state_ = state_;
+        keyframe_positions_ = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        keyframe_kdtree_ = std::make_shared<pcl::KdTreeFLANN<pcl::PointXYZ>>();
         tf_broadcaster_ = std:: make_unique<tf2_ros::TransformBroadcaster>(*this);
         static_tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
 
@@ -254,24 +256,49 @@ namespace small_dlio {
     bool OdomNode::submapGeneration(
         const State &cur_state,
         const std::vector<KeyFrame> &keyframes_snapshot,
+        const size_t source_point_count,
         pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_submap
     ) const {
 
         cloud_submap->clear();
 
-        // TODO: 临时使用kNN暴力匹配，后续换kdtree加速
-        std::vector<std::pair<double, size_t>> dists;
-        for (size_t i = 0; i < keyframes_snapshot.size(); i ++) {
+        (void)cur_state;
+        for (const auto &kf : keyframes_snapshot) {
 
-            double d = (keyframes_snapshot[i].pose.p - cur_state.pose.p).norm();
-            dists.emplace_back(d, i);
-        }
-        std::sort(dists.begin(), dists.end());
-        for (size_t i = 0; i < std::min(dists.size(), static_cast<size_t>(knn_limit_)); i ++) {
-
-            if (dists[i].first > max_distance_) break;
-            const auto &kf_cloud = keyframes_snapshot[dists[i].second].cloud;
+            const auto &kf_cloud = kf.cloud;
             if (kf_cloud && !kf_cloud->empty()) *cloud_submap += *kf_cloud;
+        }
+
+        if (cloud_submap->empty() || source_point_count == 0)
+            return true;
+
+        const size_t target_point_limit =
+            std::max<size_t>(source_point_count, 1U);
+        if (cloud_submap->size() <= target_point_limit)
+            return true;
+
+        double leaf_size = gicp_leaf_size_;
+        auto filtered_submap = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+
+        for (int iter = 0; iter < 6; ++ iter) {
+
+            pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
+            voxel_filter.setLeafSize(
+                static_cast<float>(leaf_size),
+                static_cast<float>(leaf_size),
+                static_cast<float>(leaf_size)
+            );
+            voxel_filter.setInputCloud(cloud_submap);
+            voxel_filter.filter(*filtered_submap);
+
+            if (filtered_submap->empty())
+                break;
+            *cloud_submap = *filtered_submap;
+
+            if (cloud_submap->size() <= target_point_limit)
+                break;
+
+            leaf_size *= 1.2;
         }
 
         return true;
@@ -387,9 +414,21 @@ namespace small_dlio {
         kf.pose.q.normalize();
         kf.cloud.reset(new pcl::PointCloud<pcl::PointXYZ>(*cloud_aligned));
 
-        if (keyframes_.empty()) {
+        auto append_keyframe = [&]() {
 
             keyframes_.push_back(kf);
+
+            pcl::PointXYZ p;
+            p.x = static_cast<float>(kf.pose.p.x());
+            p.y = static_cast<float>(kf.pose.p.y());
+            p.z = static_cast<float>(kf.pose.p.z());
+            keyframe_positions_->push_back(p);
+            keyframe_kdtree_->setInputCloud(keyframe_positions_);
+        };
+
+        if (keyframes_.empty()) {
+
+            append_keyframe();
             return true;
         }
 
@@ -404,7 +443,7 @@ namespace small_dlio {
         if (trans < kf_trans_thresh_ && rot < kf_rot_thresh_)
             return false;
 
-        keyframes_.push_back(kf);
+        append_keyframe();
         return true;
     }
 
@@ -816,7 +855,68 @@ PROPAGATION:
             snapshot.init_gicp = prev_T_gicp_;
             //snapshot.init_gicp = Eigen::Matrix4d::Identity();
             snapshot.imu_buffer = imu_data_;
-            snapshot.keyframes = keyframes_;
+            snapshot.has_keyframes = !keyframes_.empty();
+            snapshot.keyframes.clear();
+
+            if (snapshot.has_keyframes) {
+
+                if (keyframe_positions_ &&
+                    keyframe_kdtree_ &&
+                    !keyframe_positions_->empty() &&
+                    keyframe_positions_->size() == keyframes_.size() &&
+                    snapshot.submap_query_state.pose.p.allFinite() &&
+                    knn_limit_ > 0 &&
+                    max_distance_ > 0.0) {
+
+                    pcl::PointXYZ query;
+                    query.x = static_cast<float>(snapshot.submap_query_state.pose.p.x());
+                    query.y = static_cast<float>(snapshot.submap_query_state.pose.p.y());
+                    query.z = static_cast<float>(snapshot.submap_query_state.pose.p.z());
+
+                    const int k =
+                        std::min(knn_limit_, static_cast<int>(keyframes_.size()));
+                    std::vector<int> indices;
+                    std::vector<float> sq_dists;
+                    indices.reserve(k);
+                    sq_dists.reserve(k);
+
+                    const int found =
+                        keyframe_kdtree_->nearestKSearch(query, k, indices, sq_dists);
+                    const double max_sq_dist = max_distance_ * max_distance_;
+
+                    for (int i = 0; i < found; ++ i) {
+
+                        if (sq_dists[i] > max_sq_dist) continue;
+
+                        const int idx = indices[i];
+                        if (idx >= 0 && static_cast<size_t>(idx) < keyframes_.size())
+                            snapshot.keyframes.push_back(keyframes_[idx]);
+                    }
+                } else {
+
+                    std::vector<std::pair<double, size_t>> dists;
+                    dists.reserve(keyframes_.size());
+                    for (size_t i = 0; i < keyframes_.size(); ++ i) {
+
+                        const auto &kf = keyframes_[i];
+                        if (!kf.pose.p.allFinite() || !kf.cloud || kf.cloud->empty())
+                            continue;
+
+                        const double d =
+                            (kf.pose.p - snapshot.submap_query_state.pose.p).norm();
+                        dists.emplace_back(d, i);
+                    }
+
+                    std::sort(dists.begin(), dists.end());
+                    for (size_t i = 0;
+                        i < std::min(dists.size(), static_cast<size_t>(knn_limit_));
+                        ++ i) {
+
+                        if (dists[i].first > max_distance_) break;
+                        snapshot.keyframes.push_back(keyframes_[dists[i].second]);
+                    }
+                }
+            }
         }
 
         std::sort(
@@ -968,7 +1068,7 @@ PROPAGATION:
             publishPath(frame_state, stamp);
         };
 
-        if (snapshot.keyframes.empty()) {
+        if (!snapshot.has_keyframes) {
 
             auto cloud_aligned =
                 std::make_shared<pcl::PointCloud<pcl::PointXYZ>>(*cloud_filtered);
@@ -980,7 +1080,12 @@ PROPAGATION:
 
         // submapGeneration
         auto submap = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-        submapGeneration(snapshot.submap_query_state, snapshot.keyframes, submap);
+        submapGeneration(
+            snapshot.submap_query_state,
+            snapshot.keyframes,
+            cloud_filtered->size(),
+            submap
+        );
 
         if (submap->empty()) {
 

@@ -71,6 +71,7 @@ namespace small_dlio {
         Eigen::Matrix4d init_gicp = Eigen::Matrix4d::Identity();
         std::deque<ImuMeas> imu_buffer;
         std::vector<KeyFrame> keyframes;
+        bool has_keyframes = false;
         double scan_start = 0.0;
         double prev_ref_stamp = 0.0;
         double scan_dt = 0.0;

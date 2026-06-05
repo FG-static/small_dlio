@@ -30,6 +30,7 @@
 #include <pcl_conversions/pcl_conversions.h> // ros2和pcl消息互转
 #include <pcl-1.14/pcl/filters/voxel_grid.h> // 滤波器
 #include <pcl-1.14/pcl/common/transforms.h> // 点云坐标变换
+#include <pcl-1.14/pcl/kdtree/kdtree_flann.h> // kdtree
 
 #include <unordered_map>
 
