@@ -108,6 +108,7 @@ namespace small_dlio {
             const State &imu_state,
             const Pose &gicp_pose,
             const double &dt,
+            const double &observation_weight,
             State &fused_state
         ) const;
 
@@ -150,11 +151,15 @@ namespace small_dlio {
         State state_;
         State laser_scan_start_state_;
         State last_registered_state_;
+        double last_registered_stamp_ = 0.0;
+        int consecutive_gicp_rejects_ = 0;
+        int gicp_reject_reset_threshold_ = 3;
         Extrinsics extrinsics_;
         rclcpp::Time current_stamp_;
         rclcpp::Time latest_imu_stamp_;
 
         std::deque<ImuMeas> imu_data_;
+        std::deque<ImuMeas> imu_history_;
         std::vector<KeyFrame> keyframes_;
         pcl::PointCloud<pcl::PointXYZ>::Ptr keyframe_positions_;
         pcl::KdTreeFLANN<pcl::PointXYZ>::Ptr keyframe_kdtree_;
@@ -190,6 +195,10 @@ namespace small_dlio {
         int gicp_num_threads_ = 4;
         int gicp_correspondence_randomness_ = 20;
         double gicp_max_correspondence_distance_ = 1.0;
+        double gicp_max_correction_trans_ = 0.8;
+        double gicp_max_correction_rot_deg_ = 8.0;
+        double gicp_max_imu_to_gicp_trans_ = 0.8;
+        double gicp_max_imu_to_gicp_rot_deg_ = 8.0;
         Eigen::Matrix4d prev_T_gicp_ = Eigen::Matrix4d::Identity();
 
         // Geometric observer
@@ -199,6 +208,10 @@ namespace small_dlio {
         double Ka_ = 1.0;
         double Kg_ = 1.0;
         double b_max_ = 1.0;
+        double geo_max_delta_v_ = 0.5;
+        double geo_max_delta_ba_ = 0.1;
+        double geo_max_delta_bg_ = 0.05;
+        double geo_max_velocity_ = 20.0;
 
         // Keyframe detection
         double kf_trans_thresh_ = 0.5;

@@ -175,6 +175,11 @@ namespace small_dlio {
         declare_param("gicp_num_threads", gicp_num_threads_, 4);
         declare_param("gicp_correspondence_randomness", gicp_correspondence_randomness_, 20);
         declare_param("gicp_max_correspondence_distance", gicp_max_correspondence_distance_, 1.0);
+        declare_param("gicp_reject_reset_threshold", gicp_reject_reset_threshold_, 3);
+        declare_param("gicp_max_correction_trans", gicp_max_correction_trans_, 0.8);
+        declare_param("gicp_max_correction_rot_deg", gicp_max_correction_rot_deg_, 8.0);
+        declare_param("gicp_max_imu_to_gicp_trans", gicp_max_imu_to_gicp_trans_, 0.8);
+        declare_param("gicp_max_imu_to_gicp_rot_deg", gicp_max_imu_to_gicp_rot_deg_, 8.0);
 
         reg_.setRegistrationType("GICP");
         reg_.setNumThreads(gicp_num_threads_);
@@ -188,6 +193,10 @@ namespace small_dlio {
         declare_param("geo_Ka", Ka_, 1.0);
         declare_param("geo_Kg", Kg_, 1.0);
         declare_param("geo_b_max", b_max_, 1.0);
+        declare_param("geo_max_delta_v", geo_max_delta_v_, 0.5);
+        declare_param("geo_max_delta_ba", geo_max_delta_ba_, 0.1);
+        declare_param("geo_max_delta_bg", geo_max_delta_bg_, 0.05);
+        declare_param("geo_max_velocity", geo_max_velocity_, 20.0);
     }
 
     /**
@@ -273,33 +282,24 @@ namespace small_dlio {
             return true;
 
         const size_t target_point_limit =
-            std::max<size_t>(source_point_count, 1U);
+            std::max<size_t>(source_point_count * 2U, 1U);
         if (cloud_submap->size() <= target_point_limit)
             return true;
 
-        double leaf_size = gicp_leaf_size_;
+        pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
+        voxel_filter.setLeafSize(
+            static_cast<float>(gicp_leaf_size_),
+            static_cast<float>(gicp_leaf_size_),
+            static_cast<float>(gicp_leaf_size_)
+        );
         auto filtered_submap = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        voxel_filter.setInputCloud(cloud_submap);
+        voxel_filter.filter(*filtered_submap);
 
-        for (int iter = 0; iter < 6; ++ iter) {
-
-            pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
-            voxel_filter.setLeafSize(
-                static_cast<float>(leaf_size),
-                static_cast<float>(leaf_size),
-                static_cast<float>(leaf_size)
-            );
-            voxel_filter.setInputCloud(cloud_submap);
-            voxel_filter.filter(*filtered_submap);
-
-            if (filtered_submap->empty())
-                break;
+        if (!filtered_submap->empty())
             *cloud_submap = *filtered_submap;
 
-            if (cloud_submap->size() <= target_point_limit)
-                break;
-
-            leaf_size *= 1.2;
-        }
+        (void)source_point_count;
 
         return true;
     }
@@ -356,16 +356,28 @@ namespace small_dlio {
         const State &imu_state,
         const Pose &gicp_pose,
         const double &dt,
+        const double &observation_weight,
         State &fused_state
     ) const {
 
         if (dt <= 0.0 || !std::isfinite(dt) ||
+            !std::isfinite(observation_weight) ||
+            observation_weight <= 0.0 || observation_weight > 1.0 ||
             !imu_state.pose.p.allFinite() || !gicp_pose.p.allFinite() ||
-            !imu_state.pose.q.coeffs().allFinite() || !gicp_pose.q.coeffs().allFinite()) {
+            !imu_state.pose.q.coeffs().allFinite() || !gicp_pose.q.coeffs().allFinite() ||
+            !imu_state.v.allFinite() || !imu_state.b_a.allFinite() || !imu_state.b_g.allFinite()) {
 
             fused_state = imu_state;
             return false;
         }
+
+        // Scale observer gains instead of clipping the state update, so the fused
+        // state still follows the same model with lower LiDAR confidence.
+        const double Kp_eff = observation_weight * Kp_;
+        const double Kv_eff = observation_weight * Kv_;
+        const double Kq_eff = observation_weight * Kq_;
+        const double Ka_eff = observation_weight * Ka_;
+        const double Kg_eff = observation_weight * Kg_;
 
         const Eigen::Quaterniond q_hat = imu_state.pose.q.normalized();
         const Eigen::Quaterniond q_in = gicp_pose.q.normalized();
@@ -383,15 +395,26 @@ namespace small_dlio {
         const Eigen::Quaterniond q_corr = q_hat * q_delta;
 
         fused_state = imu_state;
-        fused_state.b_a = imu_state.b_a - dt * Ka_ * e_p_body;
+        fused_state.b_a = imu_state.b_a - dt * Ka_eff * e_p_body;
         fused_state.b_g =
-            imu_state.b_g - dt * Kg_ * Eigen::Vector3d(q_e.x(), q_e.y(), q_e.z());
+            imu_state.b_g - dt * Kg_eff * Eigen::Vector3d(q_e.x(), q_e.y(), q_e.z());
         fused_state.b_a = fused_state.b_a.cwiseMax(-b_max_).cwiseMin(b_max_);
         fused_state.b_g = fused_state.b_g.cwiseMax(-b_max_).cwiseMin(b_max_);
-        fused_state.pose.p = imu_state.pose.p + dt * Kp_ * e_p;
-        fused_state.v = imu_state.v + dt * Kv_ * e_p;
-        fused_state.pose.q.coeffs() = q_hat.coeffs() + dt * Kq_ * q_corr.coeffs();
+        fused_state.pose.p = imu_state.pose.p + dt * Kp_eff * e_p;
+        fused_state.v = imu_state.v + dt * Kv_eff * e_p;
+        fused_state.pose.q.coeffs() = q_hat.coeffs() + dt * Kq_eff * q_corr.coeffs();
         fused_state.pose.q.normalize();
+
+        if (!fused_state.pose.p.allFinite() ||
+            !fused_state.pose.q.coeffs().allFinite() ||
+            !fused_state.v.allFinite() ||
+            !fused_state.b_a.allFinite() ||
+            !fused_state.b_g.allFinite() ||
+            fused_state.v.norm() > geo_max_velocity_) {
+
+            fused_state = imu_state;
+            return false;
+        }
 
         return true;
     }
@@ -795,6 +818,7 @@ namespace small_dlio {
 
 PROPAGATION:
             imu_data_.push_back(imu);
+            imu_history_.push_back(imu);
             statePropagation(imu, dt);
             latest_imu_stamp_ = rclcpp::Time(msg->header.stamp);
         }
@@ -953,7 +977,6 @@ PROPAGATION:
             }
         }
         point_sample_indices.push_back(static_cast<int>(cloud->points.size()));
-        const double scan_end_time = timestamps.back();
 
         // buildTrajectory
         FrameTrajectory trajectory;
@@ -1023,13 +1046,21 @@ PROPAGATION:
             const Pose *keyframe_pose,
             const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_aligned,
             const double alignment_score,
-            const Eigen::Matrix4d *accepted_T_gicp
+            const Eigen::Matrix4d *accepted_T_gicp,
+            const bool reset_gicp_guess = false
         ) {
 
             bool replay_ok = true;
             bool keyframe_added = false;
+            // Snapshot live/registered states around commit for divergence logging.
+            State live_before;
+            State live_after;
+            State reg_before;
+            State reg_after;
             {
                 std::lock_guard<std::mutex> lock(mtx_);
+                live_before = state_;
+                reg_before = last_registered_state_;
                 while (imu_data_.size() >= 2 && imu_data_[1].stamp <= frame_ref_time)
                     imu_data_.pop_front();
                 if (!imu_data_.empty() && imu_data_.front().stamp < frame_ref_time)
@@ -1046,15 +1077,28 @@ PROPAGATION:
 
                 laser_scan_start_state_ = frame_state;
                 prev_scan_stamp_ = frame_ref_time;
+                if (reset_gicp_guess)
+                    prev_T_gicp_ = Eigen::Matrix4d::Identity();
                 if (update_registration) {
 
                     last_registered_state_ = frame_state;
+                    last_registered_stamp_ = frame_ref_time;
+                    consecutive_gicp_rejects_ = 0;
                     if (accepted_T_gicp) prev_T_gicp_ = *accepted_T_gicp;
                     if (keyframe_pose && cloud_aligned)
                         keyframe_added =
                             keyframeDetection(*keyframe_pose, cloud_aligned, alignment_score);
+
+                    while (imu_history_.size() >= 2 &&
+                        imu_history_[1].stamp <= last_registered_stamp_)
+                        imu_history_.pop_front();
+                    if (!imu_history_.empty() &&
+                        imu_history_.front().stamp < last_registered_stamp_)
+                        imu_history_.front().stamp = last_registered_stamp_;
                 }
                 current_stamp_ = stamp;
+                live_after = state_;
+                reg_after = last_registered_state_;
             }
 
             if (keyframe_added && cloud_aligned)
@@ -1065,7 +1109,118 @@ PROPAGATION:
                 RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
                     "Failed to replay post-frame IMU data from %.6f", frame_ref_time);
             }
+
+            const auto live_before_to_frame = pose_delta(live_before.pose, frame_state.pose);
+            const auto frame_to_live_after = pose_delta(frame_state.pose, live_after.pose);
+            const auto reg_before_to_frame = pose_delta(reg_before.pose, frame_state.pose);
+            const auto reg_after_to_live_after = pose_delta(reg_after.pose, live_after.pose);
+            RCLCPP_INFO(
+                get_logger(),
+                "commit state: update_reg=%d score=%.4f frame_t=%.6f "
+                "live_before_to_frame_dp=%.3f dr=%.2f "
+                "frame_to_live_after_dp=%.3f dr=%.2f "
+                "reg_before_to_frame_dp=%.3f dr=%.2f "
+                "reg_after_to_live_after_dp=%.3f dr=%.2f "
+                "live_before_p=[%.3f %.3f %.3f] frame_p=[%.3f %.3f %.3f] "
+                "live_after_p=[%.3f %.3f %.3f] reg_before_p=[%.3f %.3f %.3f] reg_after_p=[%.3f %.3f %.3f]",
+                update_registration ? 1 : 0, alignment_score, frame_ref_time,
+                live_before_to_frame.first, live_before_to_frame.second,
+                frame_to_live_after.first, frame_to_live_after.second,
+                reg_before_to_frame.first, reg_before_to_frame.second,
+                reg_after_to_live_after.first, reg_after_to_live_after.second,
+                live_before.pose.p.x(), live_before.pose.p.y(), live_before.pose.p.z(),
+                frame_state.pose.p.x(), frame_state.pose.p.y(), frame_state.pose.p.z(),
+                live_after.pose.p.x(), live_after.pose.p.y(), live_after.pose.p.z(),
+                reg_before.pose.p.x(), reg_before.pose.p.y(), reg_before.pose.p.z(),
+                reg_after.pose.p.x(), reg_after.pose.p.y(), reg_after.pose.p.z());
             publishPath(frame_state, stamp);
+        };
+
+        auto replay_from_last_registration = [&](
+            const double target_time,
+            State &replayed_state
+        ) {
+
+            State start_state;
+            double start_time = 0.0;
+            std::deque<ImuMeas> replay_imu;
+            int reject_count = 0;
+            {
+                std::lock_guard<std::mutex> lock(mtx_);
+                ++consecutive_gicp_rejects_;
+                reject_count = consecutive_gicp_rejects_;
+                start_state = last_registered_state_;
+                start_time = last_registered_stamp_;
+                replay_imu = imu_history_;
+            }
+
+            if (reject_count <= gicp_reject_reset_threshold_)
+                return false;
+
+            if (start_time <= 0.0 || !std::isfinite(start_time) ||
+                target_time <= start_time || replay_imu.empty()) {
+
+                RCLCPP_WARN(
+                    get_logger(),
+                    "tracking recovery skipped: rejects=%d start_t=%.6f target_t=%.6f imu_history=%zu",
+                    reject_count, start_time, target_time, replay_imu.size());
+                return false;
+            }
+
+            std::sort(
+                replay_imu.begin(), replay_imu.end(),
+                [](const ImuMeas &a, const ImuMeas &b) {
+                    return a.stamp < b.stamp;
+                });
+
+            while (replay_imu.size() >= 2 && replay_imu[1].stamp <= start_time)
+                replay_imu.pop_front();
+
+            if (replay_imu.empty() || replay_imu.back().stamp < target_time) {
+
+                RCLCPP_WARN(
+                    get_logger(),
+                    "tracking recovery skipped: rejects=%d insufficient imu history start_t=%.6f "
+                    "target_t=%.6f imu_front=%.6f imu_back=%.6f size=%zu",
+                    reject_count, start_time, target_time,
+                    replay_imu.empty() ? 0.0 : replay_imu.front().stamp,
+                    replay_imu.empty() ? 0.0 : replay_imu.back().stamp,
+                    replay_imu.size());
+                return false;
+            }
+
+            if (replay_imu.front().stamp < start_time)
+                replay_imu.front().stamp = start_time;
+
+            if (replay_imu.front().stamp > start_time + 0.02) {
+
+                RCLCPP_WARN(
+                    get_logger(),
+                    "tracking recovery skipped: rejects=%d imu history starts too late "
+                    "start_t=%.6f imu_front=%.6f target_t=%.6f",
+                    reject_count, start_time, replay_imu.front().stamp, target_time);
+                return false;
+            }
+
+            replayed_state = start_state;
+            if (!integrateImu(replayed_state, target_time, replay_imu)) {
+
+                RCLCPP_WARN(
+                    get_logger(),
+                    "tracking recovery failed during imu replay: rejects=%d start_t=%.6f target_t=%.6f",
+                    reject_count, start_time, target_time);
+                return false;
+            }
+
+            const auto recovery_delta =
+                pose_delta(start_state.pose, replayed_state.pose);
+            RCLCPP_WARN(
+                get_logger(),
+                "tracking recovery: rejects=%d reset prev_T_gicp and replay from last accepted "
+                "gicp state start_t=%.6f target_t=%.6f dp=%.3f dr=%.2f",
+                reject_count, start_time, target_time,
+                recovery_delta.first, recovery_delta.second);
+            return true;
         };
 
         if (!snapshot.has_keyframes) {
@@ -1119,66 +1274,123 @@ PROPAGATION:
         gicp_pose.q.normalize();
 
         const auto imu_to_gicp = pose_delta(imu_state.pose, gicp_pose);
+        const double corr_trans = T_corr.block<3, 1>(0, 3).norm();
+        const double corr_rot =
+            Eigen::AngleAxisd(T_corr.block<3, 3>(0, 0)).angle() * 180.0 / M_PI;
 
-        if (score >= max_alignment_score_) {
+        // Hard gate: reject the LiDAR observation before it can perturb the state.
+        const bool score_rejected =
+            !std::isfinite(score) || score >= max_alignment_score_;
+        const bool corr_rejected =
+            !std::isfinite(corr_trans) || !std::isfinite(corr_rot) ||
+            corr_trans > gicp_max_correction_trans_ ||
+            corr_rot > gicp_max_correction_rot_deg_;
+        const bool prior_rejected =
+            !std::isfinite(imu_to_gicp.first) || !std::isfinite(imu_to_gicp.second) ||
+            imu_to_gicp.first > gicp_max_imu_to_gicp_trans_ ||
+            imu_to_gicp.second > gicp_max_imu_to_gicp_rot_deg_;
 
-            // const double corr_trans = T_corr.block<3, 1>(0, 3).norm();
-            // const double corr_rot =
-            //     Eigen::AngleAxisd(T_corr.block<3, 3>(0, 0)).angle() * 180.0 / M_PI;
-            // RCLCPP_WARN(
-            //     get_logger(),
-            //     "rejected gicp pose compare: score=%.4f corr_t=%.3f corr_r=%.2f "
-            //     "imu_p=[%.3f %.3f %.3f] gicp_p=[%.3f %.3f %.3f] "
-            //     "imu_to_gicp_dp=%.3f dr=%.2f",
-            //     score, corr_trans, corr_rot,
-            //     imu_state.pose.p.x(), imu_state.pose.p.y(), imu_state.pose.p.z(),
-            //     gicp_pose.p.x(), gicp_pose.p.y(), gicp_pose.p.z(),
-            //     imu_to_gicp.first, imu_to_gicp.second);
+        if (score_rejected || corr_rejected || prior_rejected) {
 
+            RCLCPP_WARN(
+                get_logger(),
+                "gicp rejected: reason=[score:%d corr:%d prior:%d] source=%zu target=%zu "
+                "score=%.4f/%.4f corr_t=%.3f/%.3f corr_r=%.2f/%.2f "
+                "imu_to_gicp_dp=%.3f/%.3f dr=%.2f/%.2f "
+                "imu_p=[%.3f %.3f %.3f] gicp_p=[%.3f %.3f %.3f]",
+                score_rejected ? 1 : 0,
+                corr_rejected ? 1 : 0,
+                prior_rejected ? 1 : 0,
+                cloud_filtered->size(), submap->size(),
+                score, max_alignment_score_,
+                corr_trans, gicp_max_correction_trans_,
+                corr_rot, gicp_max_correction_rot_deg_,
+                imu_to_gicp.first, gicp_max_imu_to_gicp_trans_,
+                imu_to_gicp.second, gicp_max_imu_to_gicp_rot_deg_,
+                imu_state.pose.p.x(), imu_state.pose.p.y(), imu_state.pose.p.z(),
+                gicp_pose.p.x(), gicp_pose.p.y(), gicp_pose.p.z());
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
-                "GICP score %.4f >= threshold %.4f, committed IMU-only state",
-                score, max_alignment_score_);
-            commit_frame(imu_state, false, nullptr, pcl::PointCloud<pcl::PointXYZ>::Ptr(), 0.0, nullptr);
+                "GICP rejected by gate, committed IMU-only state");
+
+            State recovery_state;
+            const bool recovered =
+                replay_from_last_registration(frame_ref_time, recovery_state);
+            commit_frame(
+                recovered ? recovery_state : imu_state,
+                false,
+                nullptr,
+                pcl::PointCloud<pcl::PointXYZ>::Ptr(),
+                0.0,
+                nullptr,
+                recovered);
             return;
         }
+
+        // Soft weighting keeps the same observer equations but trusts near-threshold
+        // observations less than clean matches.
+        auto normalized_ratio = [](const double value, const double limit) {
+            if (!std::isfinite(value))
+                return 1.0;
+            if (limit <= 1e-9)
+                return value <= 0.0 ? 0.0 : 1.0;
+            return std::clamp(value / limit, 0.0, 1.0);
+        };
+
+        const double score_ratio = normalized_ratio(score, max_alignment_score_);
+        const double corr_trans_ratio = normalized_ratio(corr_trans, gicp_max_correction_trans_);
+        const double corr_rot_ratio = normalized_ratio(corr_rot, gicp_max_correction_rot_deg_);
+        const double prior_trans_ratio = normalized_ratio(imu_to_gicp.first, gicp_max_imu_to_gicp_trans_);
+        const double prior_rot_ratio = normalized_ratio(imu_to_gicp.second, gicp_max_imu_to_gicp_rot_deg_);
+        const double worst_ratio = std::max({
+            score_ratio, corr_trans_ratio, corr_rot_ratio,
+            prior_trans_ratio, prior_rot_ratio});
+        const double observation_weight = std::clamp(1.0 - worst_ratio, 0.0, 1.0);
 
         // geometricFuser
         State fused_state;
         const double fuser_dt = snapshot.scan_dt;
-        geometricFuser(imu_state, gicp_pose, fuser_dt, fused_state);
+        const bool fuser_ok =
+            geometricFuser(imu_state, gicp_pose, fuser_dt, observation_weight, fused_state);
 
-        // const auto imu_to_fused = pose_delta(imu_state.pose, fused_state.pose);
-        // const auto gicp_to_fused = pose_delta(gicp_pose, fused_state.pose);
-        // const double corr_trans = T_corr.block<3, 1>(0, 3).norm();
-        // const double corr_rot =
-        //     Eigen::AngleAxisd(T_corr.block<3, 3>(0, 0)).angle() * 180.0 / M_PI;
-        // const double prior_trans = T_prior.block<3, 1>(0, 3).norm();
-        // const double global_trans = T_global.block<3, 1>(0, 3).norm();
-        // RCLCPP_INFO(
-        //     get_logger(),
-        //     "gicp result: score=%.4f fuser_dt=%.6f scan_ref=%.6f scan_span=%.6f corr_t=%.3f corr_r=%.2f "
-        //     "prior_p=[%.3f %.3f %.3f] prior_norm=%.3f "
-        //     "global_p=[%.3f %.3f %.3f] global_norm=%.3f "
-        //     "imu_p=[%.3f %.3f %.3f] gicp_p=[%.3f %.3f %.3f] fused_p=[%.3f %.3f %.3f] "
-        //     "imu_to_gicp_dp=%.3f dr=%.2f imu_to_fused_dp=%.3f dr=%.2f gicp_to_fused_dp=%.3f dr=%.2f "
-        //     "imu_v=[%.3f %.3f %.3f] fused_v=[%.3f %.3f %.3f] "
-        //     "imu_ba=[%.3f %.3f %.3f] fused_ba=[%.3f %.3f %.3f] "
-        //     "imu_bg=[%.3f %.3f %.3f] fused_bg=[%.3f %.3f %.3f]",
-        //     score, fuser_dt, frame_ref_time, scan_end_time - snapshot.scan_start, corr_trans, corr_rot,
-        //     T_prior(0, 3), T_prior(1, 3), T_prior(2, 3), prior_trans,
-        //     T_global(0, 3), T_global(1, 3), T_global(2, 3), global_trans,
-        //     imu_state.pose.p.x(), imu_state.pose.p.y(), imu_state.pose.p.z(),
-        //     gicp_pose.p.x(), gicp_pose.p.y(), gicp_pose.p.z(),
-        //     fused_state.pose.p.x(), fused_state.pose.p.y(), fused_state.pose.p.z(),
-        //     imu_to_gicp.first, imu_to_gicp.second,
-        //     imu_to_fused.first, imu_to_fused.second,
-        //     gicp_to_fused.first, gicp_to_fused.second,
-        //     imu_state.v.x(), imu_state.v.y(), imu_state.v.z(),
-        //     fused_state.v.x(), fused_state.v.y(), fused_state.v.z(),
-        //     imu_state.b_a.x(), imu_state.b_a.y(), imu_state.b_a.z(),
-        //     fused_state.b_a.x(), fused_state.b_a.y(), fused_state.b_a.z(),
-        //     imu_state.b_g.x(), imu_state.b_g.y(), imu_state.b_g.z(),
-        //     fused_state.b_g.x(), fused_state.b_g.y(), fused_state.b_g.z());
+        if (!fuser_ok) {
+
+            RCLCPP_WARN(
+                get_logger(),
+                "fuser rejected: weight=%.3f fuser_dt=%.6f imu_v=%.3f/%.3f "
+                "imu_to_gicp_dp=%.3f dr=%.2f corr_t=%.3f corr_r=%.2f",
+                observation_weight, fuser_dt, imu_state.v.norm(), geo_max_velocity_,
+                imu_to_gicp.first, imu_to_gicp.second, corr_trans, corr_rot);
+
+            State recovery_state;
+            const bool recovered =
+                replay_from_last_registration(frame_ref_time, recovery_state);
+            commit_frame(
+                recovered ? recovery_state : imu_state,
+                false,
+                nullptr,
+                pcl::PointCloud<pcl::PointXYZ>::Ptr(),
+                0.0,
+                nullptr,
+                recovered);
+            return;
+        }
+
+        const auto imu_to_fused = pose_delta(imu_state.pose, fused_state.pose);
+        const auto gicp_to_fused = pose_delta(gicp_pose, fused_state.pose);
+        RCLCPP_INFO(
+            get_logger(),
+            "gicp accepted: score=%.4f source=%zu target=%zu "
+            "corr_t=%.3f corr_r=%.2f fuser_dt=%.6f weight=%.3f "
+            "imu_to_gicp_dp=%.3f dr=%.2f imu_to_fused_dp=%.3f dr=%.2f gicp_to_fused_dp=%.3f dr=%.2f "
+            "imu_p=[%.3f %.3f %.3f] gicp_p=[%.3f %.3f %.3f] fused_p=[%.3f %.3f %.3f]",
+            score, cloud_filtered->size(), submap->size(),
+            corr_trans, corr_rot, fuser_dt, observation_weight,
+            imu_to_gicp.first, imu_to_gicp.second,
+            imu_to_fused.first, imu_to_fused.second,
+            gicp_to_fused.first, gicp_to_fused.second,
+            imu_state.pose.p.x(), imu_state.pose.p.y(), imu_state.pose.p.z(),
+            gicp_pose.p.x(), gicp_pose.p.y(), gicp_pose.p.z(),
+            fused_state.pose.p.x(), fused_state.pose.p.y(), fused_state.pose.p.z());
 
         auto cloud_aligned = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
         pcl::transformPointCloud(*cloud_filtered, *cloud_aligned, T_corr.cast<float>());

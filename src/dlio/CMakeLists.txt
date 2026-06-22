@@ -27,7 +27,26 @@ find_package(livox_ros_driver2 REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common filters kdtree)
 find_package(small_gicp REQUIRED)
+find_package(OpenCV REQUIRED)
 find_package(OpenMP REQUIRED)
+
+add_library(lidar_iris_vendor STATIC
+  third_party/lidar_iris/LidarIris.cpp
+  third_party/lidar_iris/fftm/fftm.cpp
+)
+
+target_include_directories(lidar_iris_vendor
+  PUBLIC
+    third_party/lidar_iris
+    ${PCL_INCLUDE_DIRS}
+    ${OpenCV_INCLUDE_DIRS}
+)
+
+target_link_libraries(lidar_iris_vendor
+  PUBLIC
+    ${PCL_LIBRARIES}
+    ${OpenCV_LIBS}
+)
 
 add_executable(dlio_node
   src/main.cpp
@@ -60,6 +79,7 @@ target_link_libraries(dlio_node
   Eigen3::Eigen
   ${PCL_LIBRARIES}
   small_gicp::small_gicp
+  lidar_iris_vendor
   OpenMP::OpenMP_CXX
 )
 
@@ -69,6 +89,10 @@ install(TARGETS dlio_node
 
 install(DIRECTORY include/
   DESTINATION include
+)
+
+install(DIRECTORY third_party/lidar_iris/
+  DESTINATION share/${PROJECT_NAME}/third_party/lidar_iris
 )
 
 install(DIRECTORY config/
