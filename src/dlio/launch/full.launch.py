@@ -11,10 +11,16 @@ def generate_launch_description():
 
     pkg_dir = get_package_share_directory('dlio')
     config_file = os.path.join(pkg_dir, 'config', 'config.yaml')
+    backend_config_file = os.path.join(pkg_dir, 'config', 'backend.yaml')
 
     rviz_arg = DeclareLaunchArgument(
         'rviz', default_value='true',
         description='Whether to launch RViz2'
+    )
+
+    backend_arg = DeclareLaunchArgument(
+        'backend', default_value='false',
+        description='Whether to launch optional loop-closure/backend nodes'
     )
 
     odom_node = Node(
@@ -29,6 +35,15 @@ def generate_launch_description():
         ]
     )
 
+    loop_detector_node = Node(
+        package='dlio',
+        executable='loop_detector_node',
+        name='small_dlio_loop_detector',
+        output='screen',
+        parameters=[backend_config_file],
+        condition=IfCondition(LaunchConfiguration('backend')),
+    )
+
     rviz_node = Node(
         package='rviz2',
         executable='rviz2',
@@ -40,6 +55,8 @@ def generate_launch_description():
 
     return LaunchDescription([
         rviz_arg,
+        backend_arg,
         odom_node,
+        loop_detector_node,
         rviz_node,
     ])

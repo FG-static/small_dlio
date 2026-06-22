@@ -1,6 +1,7 @@
 #ifndef SMALL_DLIO__ODOM_NODE
 #define SMALL_DLIO__ODOM_NODE
 
+#include "dlio/msg/key_frame.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "point_types.hpp"
 #include "rclcpp/time.hpp"
@@ -40,6 +41,13 @@ namespace small_dlio {
             const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
             const rclcpp::Time &stamp
         );
+        void publishKeyframeMsg(
+            const uint32_t id,
+            const Pose &pose,
+            const pcl::PointCloud<pcl::PointXYZ>::Ptr &local_cloud,
+            const rclcpp::Time &stamp,
+            const double alignment_score
+        );
         void publishLiveState();
 
         rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr
@@ -56,6 +64,8 @@ namespace small_dlio {
             pub_cloud_;
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
             pub_keyframe_cloud_;
+        rclcpp::Publisher<dlio::msg::KeyFrame>::SharedPtr
+            pub_keyframe_msg_;
         rclcpp::TimerBase::SharedPtr publish_timer_;
         std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
         std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;

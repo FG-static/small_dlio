@@ -102,6 +102,10 @@ namespace small_dlio {
             create_publisher<sensor_msgs::msg::PointCloud2>(
                 "keyframe", 10
             );
+        pub_keyframe_msg_ =
+            create_publisher<dlio::msg::KeyFrame>(
+                "keyframe_msg", 10
+            );
         publish_timer_ = create_wall_timer(
             std::chrono::milliseconds(10),
             [this]() {
@@ -1024,6 +1028,29 @@ PROPAGATION:
             return;
         }
 
+        auto cloud_local = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        cloud_local->reserve(cloud->size());
+        for (const auto &point : cloud->points) {
+
+            pcl::PointXYZ local_point;
+            local_point.x = point.x;
+            local_point.y = point.y;
+            local_point.z = point.z;
+            cloud_local->push_back(local_point);
+        }
+        cloud_local->width = static_cast<uint32_t>(cloud_local->size());
+        cloud_local->height = 1;
+        cloud_local->is_dense = false;
+
+        auto cloud_local_filtered = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        voxel_filter.setInputCloud(cloud_local);
+        voxel_filter.filter(*cloud_local_filtered);
+        if (cloud_local_filtered->empty()) {
+
+            RCLCPP_WARN(get_logger(), "local voxel filter produced empty cloud");
+            return;
+        }
+
         sensor_msgs::msg::PointCloud2 cloud_msg;
         pcl::toROSMsg(*cloud_deskewed, cloud_msg);
         cloud_msg.header.stamp = stamp;
@@ -1045,6 +1072,7 @@ PROPAGATION:
             const bool update_registration,
             const Pose *keyframe_pose,
             const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_aligned,
+            const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_local,
             const double alignment_score,
             const Eigen::Matrix4d *accepted_T_gicp,
             const bool reset_gicp_guess = false
@@ -1052,6 +1080,8 @@ PROPAGATION:
 
             bool replay_ok = true;
             bool keyframe_added = false;
+            uint32_t keyframe_id = 0;
+            Pose published_keyframe_pose;
             // Snapshot live/registered states around commit for divergence logging.
             State live_before;
             State live_after;
@@ -1085,9 +1115,17 @@ PROPAGATION:
                     last_registered_stamp_ = frame_ref_time;
                     consecutive_gicp_rejects_ = 0;
                     if (accepted_T_gicp) prev_T_gicp_ = *accepted_T_gicp;
-                    if (keyframe_pose && cloud_aligned)
+                    if (keyframe_pose && cloud_aligned) {
+                        
                         keyframe_added =
                             keyframeDetection(*keyframe_pose, cloud_aligned, alignment_score);
+                        if (keyframe_added) {
+
+                            keyframe_id =
+                                static_cast<uint32_t>(keyframes_.size() - 1U);
+                            published_keyframe_pose = *keyframe_pose;
+                        }
+                    }
 
                     while (imu_history_.size() >= 2 &&
                         imu_history_[1].stamp <= last_registered_stamp_)
@@ -1103,6 +1141,14 @@ PROPAGATION:
 
             if (keyframe_added && cloud_aligned)
                 publishKeyframeCloud(cloud_aligned, stamp);
+            if (keyframe_added && cloud_local)
+                publishKeyframeMsg(
+                    keyframe_id,
+                    published_keyframe_pose,
+                    cloud_local,
+                    stamp,
+                    alignment_score
+                );
 
             if (!replay_ok) {
 
@@ -1228,7 +1274,14 @@ PROPAGATION:
             auto cloud_aligned =
                 std::make_shared<pcl::PointCloud<pcl::PointXYZ>>(*cloud_filtered);
             const Pose first_pose = imu_state.pose;
-            commit_frame(imu_state, true, &first_pose, cloud_aligned, 0.0, nullptr);
+            commit_frame(
+                imu_state,
+                true,
+                &first_pose,
+                cloud_aligned,
+                cloud_local_filtered,
+                0.0,
+                nullptr);
             RCLCPP_INFO(get_logger(), "First keyframe published");
             return;
         }
@@ -1246,7 +1299,14 @@ PROPAGATION:
 
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
                 "submapGeneration produced an empty submap, committed IMU-only state");
-            commit_frame(imu_state, false, nullptr, pcl::PointCloud<pcl::PointXYZ>::Ptr(), 0.0, nullptr);
+            commit_frame(
+                imu_state,
+                false,
+                nullptr,
+                pcl::PointCloud<pcl::PointXYZ>::Ptr(),
+                pcl::PointCloud<pcl::PointXYZ>::Ptr(),
+                0.0,
+                nullptr);
             return;
         }
 
@@ -1258,7 +1318,14 @@ PROPAGATION:
 
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
                 "scanToMap failed, committed IMU-only state");
-            commit_frame(imu_state, false, nullptr, pcl::PointCloud<pcl::PointXYZ>::Ptr(), 0.0, nullptr);
+            commit_frame(
+                imu_state,
+                false,
+                nullptr,
+                pcl::PointCloud<pcl::PointXYZ>::Ptr(),
+                pcl::PointCloud<pcl::PointXYZ>::Ptr(),
+                0.0,
+                nullptr);
             return;
         }
 
@@ -1320,6 +1387,7 @@ PROPAGATION:
                 false,
                 nullptr,
                 pcl::PointCloud<pcl::PointXYZ>::Ptr(),
+                pcl::PointCloud<pcl::PointXYZ>::Ptr(),
                 0.0,
                 nullptr,
                 recovered);
@@ -1369,6 +1437,7 @@ PROPAGATION:
                 false,
                 nullptr,
                 pcl::PointCloud<pcl::PointXYZ>::Ptr(),
+                pcl::PointCloud<pcl::PointXYZ>::Ptr(),
                 0.0,
                 nullptr,
                 recovered);
@@ -1396,7 +1465,14 @@ PROPAGATION:
         pcl::transformPointCloud(*cloud_filtered, *cloud_aligned, T_corr.cast<float>());
 
         // publish normal end
-        commit_frame(fused_state, true, &gicp_pose, cloud_aligned, score, &T_corr);
+        commit_frame(
+            fused_state,
+            true,
+            &gicp_pose,
+            cloud_aligned,
+            cloud_local_filtered,
+            score,
+            &T_corr);
 
         // RCLCPP_INFO(
         //     get_logger(),
@@ -1498,6 +1574,39 @@ PROPAGATION:
         cloud_msg.header.stamp = stamp;
         cloud_msg.header.frame_id = odom_frame_;
         pub_keyframe_cloud_->publish(cloud_msg);
+    }
+
+    void OdomNode::publishKeyframeMsg(
+        const uint32_t id,
+        const Pose &pose,
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr &local_cloud,
+        const rclcpp::Time &stamp,
+        const double alignment_score
+    ) {
+
+        if (!local_cloud || local_cloud->empty() ||
+            !pose.p.allFinite() || !pose.q.coeffs().allFinite())
+            return;
+
+        dlio::msg::KeyFrame msg;
+        msg.header.stamp = stamp;
+        msg.header.frame_id = odom_frame_;
+        msg.id = id;
+        msg.pose.position.x = pose.p.x();
+        msg.pose.position.y = pose.p.y();
+        msg.pose.position.z = pose.p.z();
+        const Eigen::Quaterniond q = pose.q.normalized();
+        msg.pose.orientation.w = q.w();
+        msg.pose.orientation.x = q.x();
+        msg.pose.orientation.y = q.y();
+        msg.pose.orientation.z = q.z();
+        msg.alignment_score = alignment_score;
+
+        pcl::toROSMsg(*local_cloud, msg.cloud);
+        msg.cloud.header.stamp = stamp;
+        msg.cloud.header.frame_id = lidar_frame_;
+
+        pub_keyframe_msg_->publish(msg);
     }
 
     void OdomNode::publishLiveState() {

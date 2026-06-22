@@ -6,10 +6,11 @@
 
 - `OdomNode`：IMU 预积分、点云去畸变、submap 构建、GICP 配准、状态发布
 - `MapNode`：订阅 keyframe 点云、体素滤波、在线累积并发布全局地图，支持手动保存 PCD
+- `LoopDetectorNode`：可选后端模块，订阅 keyframe 消息并使用 LiDAR-Iris 做候选回环检测与 RViz 连线显示
 
 ## 当前状态
 
-目前工程重点仍是里程计主链路，建图部分已经具备基础在线建图能力，当前支持：
+目前工程默认仍作为轻量级前端 LIO 使用。建图部分已经具备基础在线建图能力，当前支持：
 
 - 订阅 `/keyframe`
 - 对每帧 keyframe 做 voxel filter
@@ -18,22 +19,35 @@
 - 通过 `/save_map` service 保存当前全局地图为 PCD
 - 使用保存下来的 `global_map.pcd` 离线渲染地图图片
 
-但还没有做完整的地图管理能力，例如：
+后端功能目前是可选实验模块，默认不启动。已具备：
+
+- 订阅 `/keyframe_msg`
+- 使用 LiDAR-Iris 生成关键帧描述子
+- 输出候选回环日志
+- 发布 `/loop_candidates_marker`，在 RViz 中显示 keyframe 节点、相邻边、候选回环边
+
+但还没有做完整后端能力，例如：
 
 - 全局地图的二次重采样或分层管理
 - 地图加载与重发布
 - 分块地图或局部地图裁剪
-- 后台优化/回环
+- 回环候选的 GICP 几何验证
+- PGO 后端优化
+- 优化后轨迹/地图发布
 
 ## 目录结构
 
 ```text
 small_dlio/
 ├── src/dlio/
+│   ├── config/backend.yaml
 │   ├── config/config.yaml
 │   ├── include/small_dlio/
 │   ├── launch/full.launch.py
+│   ├── msg/KeyFrame.msg
+│   ├── third_party/lidar_iris/
 │   └── src/
+│       ├── loop_detector_node.cpp
 │       ├── main.cpp
 │       ├── odom_node.cpp
 │       └── map_node.cpp
@@ -72,7 +86,7 @@ colcon build --packages-select dlio --event-handlers console_direct+
 
 ## 运行
 
-启动节点：
+默认启动纯前端 LIO + map，不启动后端：
 
 ```bash
 source install/setup.bash
@@ -91,6 +105,14 @@ ros2 bag play /home/goose/fastlio/rosbag2_mid360_10hz --clock
 ros2 launch dlio full.launch.py rviz:=true
 ```
 
+如果需要同时启动可选后端回环候选检测：
+
+```bash
+ros2 launch dlio full.launch.py rviz:=true backend:=true
+```
+
+当前 `backend:=true` 只启动 LiDAR-Iris loop detector，用于候选回环检测和 RViz 连线显示，不会修正 `/odom`、`/path` 或 `/global_map`。
+
 ## 默认订阅与发布
 
 ### 订阅
@@ -107,7 +129,15 @@ ros2 launch dlio full.launch.py rviz:=true
 - `/tf`
 - `/tf_static`
 - `/deskewed`
+- `/keyframe`
+- `/keyframe_msg`
 - `/global_map`
+
+### 可选后端发布
+
+仅在 `backend:=true` 时发布：
+
+- `/loop_candidates_marker`：RViz `MarkerArray`，显示 keyframe 节点、相邻边和候选回环边
 
 ### Service
 
@@ -119,6 +149,10 @@ ros2 launch dlio full.launch.py rviz:=true
 
 [`src/dlio/config/config.yaml`](/home/goose/small_dlio/src/dlio/config/config.yaml)
 
+可选后端配置文件位置：
+
+[`src/dlio/config/backend.yaml`](/home/goose/small_dlio/src/dlio/config/backend.yaml)
+
 当前较关键的参数包括：
 
 - `kf_trans_thresh`：关键帧平移阈值
@@ -129,6 +163,12 @@ ros2 launch dlio full.launch.py rviz:=true
 - `map_leaf_size`：`MapNode` 对 keyframe 做体素滤波时使用的 leaf size
 - `save_map_service_name`：地图保存 service 名称
 - `map_save_path`：PCD 默认保存路径
+
+后端参数包括：
+
+- `loop_min_keyframe_gap`：候选回环最小 keyframe 间隔
+- `loop_iris_distance_thresh`：LiDAR-Iris 描述子候选阈值
+- `iris_match_num`：同向/反向回环匹配模式
 
 ## 保存地图
 
@@ -157,6 +197,8 @@ ros2 service call /save_map std_srvs/srv/Trigger {}
 
 建议固定坐标系使用 `odom`。
 
+如果启动了 `backend:=true`，RViz 中添加 `MarkerArray` 并选择 `/loop_candidates_marker`，可以查看候选回环连线。黄色边表示 LiDAR-Iris 候选回环，还不是经过几何验证和 PGO 修正后的最终回环。
+
 ## 运行截图
 
 下面这张图由保存下来的 `global_map.pcd` 离线渲染得到，左侧是俯视图，右侧是斜视图。
@@ -169,4 +211,6 @@ ros2 service call /save_map std_srvs/srv/Trigger {}
 - 增加地图加载与重发布能力
 - 将 odom / map 节点进一步解耦
 - 为保存地图增加可配置输出格式或保存前重采样选项
-- 评估是否引入回环或离线建图流程
+- 为 LiDAR-Iris 候选回环增加 GICP 几何验证
+- 增加 PGO 后端，并通过 `backend:=true` 开关启动
+- 发布优化后的 path / map，并保持前端 odom 默认行为不受影响
