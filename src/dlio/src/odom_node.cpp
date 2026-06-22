@@ -185,10 +185,11 @@ namespace small_dlio {
         declare_param("gicp_max_imu_to_gicp_trans", gicp_max_imu_to_gicp_trans_, 0.8);
         declare_param("gicp_max_imu_to_gicp_rot_deg", gicp_max_imu_to_gicp_rot_deg_, 8.0);
 
-        reg_.setRegistrationType("GICP");
-        reg_.setNumThreads(gicp_num_threads_);
-        reg_.setCorrespondenceRandomness(gicp_correspondence_randomness_);
-        reg_.setMaxCorrespondenceDistance(gicp_max_correspondence_distance_);
+        gicp_matcher_.configure(GicpParams{
+            gicp_num_threads_,
+            gicp_correspondence_randomness_,
+            gicp_max_correspondence_distance_
+        });
 
         // Geometric Observer
         declare_param("geo_Kp", Kp_, 1.0);
@@ -316,43 +317,22 @@ namespace small_dlio {
         double &alignment_score
     ) {
 
-        if (!source_cloud || source_cloud->empty() ||
-            !target_cloud || target_cloud->empty()) {
+        const GicpResult result =
+            gicp_matcher_.align(source_cloud, target_cloud, init_guess);
 
-            trans_gicp = Eigen::Matrix4d::Identity();
-            alignment_score = 1e9;
-            return false;
-        }
-
-        reg_.setInputSource(source_cloud);
-        reg_.setInputTarget(target_cloud);
-
-        auto aligned = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-
-        try {
-
-            reg_.align(*aligned, init_guess.cast<float>());
-        } catch (const std::exception &e) {
+        if (!result.success) {
 
             RCLCPP_WARN_THROTTLE(
                 this->get_logger(), *this->get_clock(), log_throttle_ms_,
-                "GICP 配准异常，跳过本帧: %s", e.what());
+                "GICP 配准失败，跳过本帧: %s",
+                result.error_message.c_str());
             trans_gicp = Eigen::Matrix4d::Identity();
             alignment_score = 1e9;
             return false;
         }
 
-        alignment_score = reg_.getFitnessScore();
-        trans_gicp = reg_.getFinalTransformation().cast<double>();
-        if (!trans_gicp.allFinite()) {
-
-            alignment_score = 1e9;
-            trans_gicp = Eigen::Matrix4d::Identity();
-            RCLCPP_WARN_THROTTLE(
-                this->get_logger(), *this->get_clock(), log_throttle_ms_,
-                "GICP 配准存在非法结果，跳过本帧");
-            return false;
-        }
+        alignment_score = result.score;
+        trans_gicp = result.transform;
         return true;
     }
 
@@ -1116,7 +1096,7 @@ PROPAGATION:
                     consecutive_gicp_rejects_ = 0;
                     if (accepted_T_gicp) prev_T_gicp_ = *accepted_T_gicp;
                     if (keyframe_pose && cloud_aligned) {
-                        
+
                         keyframe_added =
                             keyframeDetection(*keyframe_pose, cloud_aligned, alignment_score);
                         if (keyframe_added) {
@@ -1493,10 +1473,6 @@ PROPAGATION:
         const State &state,
         const rclcpp::Time &stamp
     ) {
-
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
-            "publishOdometry called, pos=[%.2f, %.2f, %.2f]",
-            state.pose.p.x(), state.pose.p.y(), state.pose.p.z());
 
         nav_msgs::msg::Odometry odom;
         odom.header.stamp = stamp;

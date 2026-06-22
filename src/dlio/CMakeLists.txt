@@ -58,6 +58,24 @@ target_link_libraries(lidar_iris_vendor
     ${OpenCV_LIBS}
 )
 
+add_library(small_dlio_gicp STATIC
+  src/gicp.cpp
+)
+
+target_include_directories(small_dlio_gicp
+  PUBLIC
+    include
+    include/small_dlio
+    ${PCL_INCLUDE_DIRS}
+)
+
+target_link_libraries(small_dlio_gicp
+  PUBLIC
+    Eigen3::Eigen
+    ${PCL_LIBRARIES}
+    small_gicp::small_gicp
+)
+
 add_executable(dlio_node
   src/main.cpp
   src/map_node.cpp
@@ -115,7 +133,7 @@ ament_target_dependencies(loop_detector_node
 target_link_libraries(dlio_node
   Eigen3::Eigen
   ${PCL_LIBRARIES}
-  small_gicp::small_gicp
+  small_dlio_gicp
   lidar_iris_vendor
   OpenMP::OpenMP_CXX
   "${cpp_typesupport_target}"
@@ -124,6 +142,7 @@ target_link_libraries(dlio_node
 target_link_libraries(loop_detector_node
   ${PCL_LIBRARIES}
   ${OpenCV_LIBS}
+  small_dlio_gicp
   lidar_iris_vendor
   "${cpp_typesupport_target}"
 )

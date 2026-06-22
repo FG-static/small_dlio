@@ -3,6 +3,8 @@
 #include "geometry_msgs/msg/point.hpp"
 #include "pcl_conversions/pcl_conversions.h"
 
+#include <Eigen/Geometry>
+
 #include <cmath>
 #include <limits>
 #include <utility>
@@ -20,6 +22,12 @@ namespace small_dlio {
             iris_sigma_onf_,
             iris_match_num_
         );
+
+        gicp_matcher_.configure(GicpParams{
+            loop_gicp_num_threads_,
+            loop_gicp_correspondence_randomness_,
+            loop_gicp_max_correspondence_distance_
+        });
 
         sub_keyframe_ =
             create_subscription<dlio::msg::KeyFrame>(
@@ -45,6 +53,17 @@ namespace small_dlio {
         declare_parameter("loop_enable", loop_enable_);
         declare_parameter("loop_min_keyframe_gap", loop_min_keyframe_gap_);
         declare_parameter("loop_iris_distance_thresh", loop_iris_distance_thresh_);
+        declare_parameter("loop_gicp_enable", loop_gicp_enable_);
+        declare_parameter("loop_gicp_score_thresh", loop_gicp_score_thresh_);
+        declare_parameter("loop_gicp_max_correction_trans", loop_gicp_max_correction_trans_);
+        declare_parameter("loop_gicp_max_correction_rot_deg", loop_gicp_max_correction_rot_deg_);
+        declare_parameter("loop_gicp_num_threads", loop_gicp_num_threads_);
+        declare_parameter(
+            "loop_gicp_correspondence_randomness",
+            loop_gicp_correspondence_randomness_);
+        declare_parameter(
+            "loop_gicp_max_correspondence_distance",
+            loop_gicp_max_correspondence_distance_);
         declare_parameter("iris_nscale", iris_nscale_);
         declare_parameter("iris_min_wave_length", iris_min_wave_length_);
         declare_parameter("iris_mult", iris_mult_);
@@ -57,6 +76,17 @@ namespace small_dlio {
         get_parameter("loop_enable", loop_enable_);
         get_parameter("loop_min_keyframe_gap", loop_min_keyframe_gap_);
         get_parameter("loop_iris_distance_thresh", loop_iris_distance_thresh_);
+        get_parameter("loop_gicp_enable", loop_gicp_enable_);
+        get_parameter("loop_gicp_score_thresh", loop_gicp_score_thresh_);
+        get_parameter("loop_gicp_max_correction_trans", loop_gicp_max_correction_trans_);
+        get_parameter("loop_gicp_max_correction_rot_deg", loop_gicp_max_correction_rot_deg_);
+        get_parameter("loop_gicp_num_threads", loop_gicp_num_threads_);
+        get_parameter(
+            "loop_gicp_correspondence_randomness",
+            loop_gicp_correspondence_randomness_);
+        get_parameter(
+            "loop_gicp_max_correspondence_distance",
+            loop_gicp_max_correspondence_distance_);
         get_parameter("iris_nscale", iris_nscale_);
         get_parameter("iris_min_wave_length", iris_min_wave_length_);
         get_parameter("iris_mult", iris_mult_);
@@ -97,15 +127,25 @@ namespace small_dlio {
             LoopCandidate candidate;
             if (detectLoopCandidate(keyframe, candidate)) {
 
-                loop_candidates_.push_back(candidate);
-                RCLCPP_INFO(
-                    get_logger(),
-                    "Loop candidate: current=%u history=%u iris_distance=%.4f yaw_bias=%d",
-                    candidate.current_id,
-                    candidate.history_id,
-                    candidate.iris_distance,
-                    candidate.yaw_bias
-                );
+                if (!loop_gicp_enable_ ||
+                    verifyLoopCandidateByGicp(keyframe, candidate)) {
+
+                    loop_candidates_.push_back(candidate);
+                    RCLCPP_INFO(
+                        get_logger(),
+                        "Loop candidate: current=%u history=%u iris=%.4f "
+                        "yaw_bias=%d gicp_enable=%d gicp_score=%.4f "
+                        "corr_t=%.3f corr_r=%.2f",
+                        candidate.current_id,
+                        candidate.history_id,
+                        candidate.iris_distance,
+                        candidate.yaw_bias,
+                        loop_gicp_enable_ ? 1 : 0,
+                        candidate.gicp_score,
+                        candidate.gicp_correction_trans,
+                        candidate.gicp_correction_rot_deg
+                    );
+                }
             }
         }
 
@@ -192,6 +232,89 @@ namespace small_dlio {
         return true;
     }
 
+    /**
+     * @brief 使用 GICP 匹配潜在回环帧筛选真正回环帧
+     * @param current 目前的点云帧
+     * @param candidate 潜在回环点云帧
+     * @return bool 是否成功
+     */
+    bool LoopDetectorNode::verifyLoopCandidateByGicp(
+        const LoopKeyFrame &current,
+        LoopCandidate &candidate
+    ) {
+
+        const auto *history = findKeyFrame(candidate.history_id);
+        if (!history || !current.cloud || current.cloud->empty() ||
+            !history->cloud || history->cloud->empty())
+            return false;
+
+        const Eigen::Matrix4d T_world_current = poseToMatrix(current.pose);
+        const Eigen::Matrix4d T_world_history = poseToMatrix(history->pose);
+        if (!T_world_current.allFinite() || !T_world_history.allFinite())
+            return false;
+
+        const Eigen::Matrix4d init_guess =
+            T_world_history.inverse() * T_world_current;
+
+        const GicpResult result =
+            gicp_matcher_.align(current.cloud, history->cloud, init_guess);
+
+        if (!result.success) {
+
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "Loop GICP failed: current=%u history=%u iris=%.4f reason=%s",
+                candidate.current_id,
+                candidate.history_id,
+                candidate.iris_distance,
+                result.error_message.c_str()
+            );
+            return false;
+        }
+
+        const Eigen::Matrix4d correction = init_guess.inverse() * result.transform;
+        const double corr_t = correction.block<3, 1>(0, 3).norm();
+        Eigen::Matrix3d corr_R = correction.block<3, 3>(0, 0);
+        Eigen::Quaterniond corr_q(corr_R);
+        corr_q.normalize();
+        double corr_r_deg = Eigen::AngleAxisd(corr_q).angle() * 180.0 / M_PI;
+        if (corr_r_deg > 180.0)
+            corr_r_deg = 360.0 - corr_r_deg;
+
+        candidate.gicp_score = result.score;
+        candidate.gicp_correction_trans = corr_t;
+        candidate.gicp_correction_rot_deg = corr_r_deg;
+        candidate.source_to_target = result.transform;
+
+        const bool accepted =
+            std::isfinite(result.score) &&
+            result.score < loop_gicp_score_thresh_ &&
+            std::isfinite(corr_t) &&
+            corr_t <= loop_gicp_max_correction_trans_ &&
+            std::isfinite(corr_r_deg) &&
+            corr_r_deg <= loop_gicp_max_correction_rot_deg_;
+
+        candidate.gicp_verified = accepted;
+
+        if (!accepted) {
+
+            RCLCPP_INFO(
+                get_logger(),
+                "Rejected loop by GICP: current=%u history=%u iris=%.4f "
+                "score=%.4f corr_t=%.3f corr_r=%.2f",
+                candidate.current_id,
+                candidate.history_id,
+                candidate.iris_distance,
+                result.score,
+                corr_t,
+                corr_r_deg
+            );
+            return false;
+        }
+
+        return true;
+    }
+
     bool LoopDetectorNode::isCandidateAllowed(
         const LoopKeyFrame &current,
         const LoopKeyFrame &history
@@ -209,6 +332,39 @@ namespace small_dlio {
             !current.iris_descriptor.M.empty() &&
             !history.iris_descriptor.T.empty() &&
             !history.iris_descriptor.M.empty();
+    }
+
+    const LoopDetectorNode::LoopKeyFrame *LoopDetectorNode::findKeyFrame(
+        const uint32_t id
+    ) const {
+
+        for (const auto &keyframe : keyframes_)
+            if (keyframe.id == id)
+                return &keyframe;
+        return nullptr;
+    }
+
+    Eigen::Matrix4d LoopDetectorNode::poseToMatrix(
+        const geometry_msgs::msg::Pose &pose
+    ) const {
+
+        Eigen::Quaterniond q(
+            pose.orientation.w,
+            pose.orientation.x,
+            pose.orientation.y,
+            pose.orientation.z
+        );
+        if (!q.coeffs().allFinite() || q.norm() < 1e-6)
+            return Eigen::Matrix4d::Constant(
+                std::numeric_limits<double>::quiet_NaN());
+        q.normalize();
+
+        Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
+        T.block<3, 3>(0, 0) = q.toRotationMatrix();
+        T(0, 3) = pose.position.x;
+        T(1, 3) = pose.position.y;
+        T(2, 3) = pose.position.z;
+        return T;
     }
 
     void LoopDetectorNode::storeKeyFrame(
@@ -241,13 +397,6 @@ namespace small_dlio {
             point.y = pose.position.y;
             point.z = pose.position.z;
             return point;
-        };
-
-        auto find_keyframe = [this](const uint32_t id) -> const LoopKeyFrame * {
-            for (const auto &keyframe : keyframes_)
-                if (keyframe.id == id)
-                    return &keyframe;
-            return nullptr;
         };
 
         auto nodes = make_base_marker(
@@ -297,8 +446,8 @@ namespace small_dlio {
         loop_edges.points.reserve(loop_candidates_.size() * 2U);
         for (const auto &candidate : loop_candidates_) {
 
-            const auto *current = find_keyframe(candidate.current_id);
-            const auto *history = find_keyframe(candidate.history_id);
+            const auto *current = findKeyFrame(candidate.current_id);
+            const auto *history = findKeyFrame(candidate.history_id);
             if (!current || !history)
                 continue;
 

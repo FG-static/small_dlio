@@ -2,6 +2,7 @@
 #define SMALL_DLIO__ODOM_NODE
 
 #include "dlio/msg/key_frame.hpp"
+#include "gicp.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "point_types.hpp"
 #include "rclcpp/time.hpp"
@@ -153,7 +154,7 @@ namespace small_dlio {
             std::deque<ImuMeas> &imu_buffer
         );
 
-        small_gicp::RegistrationPCL<pcl::PointXYZ, pcl::PointXYZ> reg_;
+        GicpMatcher gicp_matcher_;
 
         // Actually, the state data is:
         // state_(k-1) -> state_(k; after integrateImu) -- if trigger callbackLivoxCloud --------┐
