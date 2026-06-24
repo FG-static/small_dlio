@@ -5,6 +5,9 @@
 #include "dlio/msg/key_frame.hpp"
 #include "gicp.hpp"
 #include "geometry_msgs/msg/pose.hpp"
+#include "geometry_msgs/msg/pose_stamped.hpp"
+#include "nav_msgs/msg/path.hpp"
+#include "pose_graph.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
@@ -32,6 +35,7 @@ namespace small_dlio {
 
             uint32_t id = 0;
             rclcpp::Time stamp;
+            double travel_distance = 0.0;
             geometry_msgs::msg::Pose pose;
             pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
             cv::Mat1b iris_image;
@@ -72,6 +76,13 @@ namespace small_dlio {
             LoopCandidate &candidate
         ) const;
 
+        bool detectLoopCandidate(
+            const LoopKeyFrame &current,
+            LoopCandidate &candidate,
+            float &best_distance,
+            int &eligible_count
+        ) const;
+
         bool verifyLoopCandidateByGicp(
             const LoopKeyFrame &current,
             LoopCandidate &candidate
@@ -90,27 +101,67 @@ namespace small_dlio {
             const geometry_msgs::msg::Pose &pose
         ) const;
 
+        Eigen::Isometry3d poseToIsometry(
+            const geometry_msgs::msg::Pose &pose
+        ) const;
+
+        Eigen::Isometry3d matrixToIsometry(
+            const Eigen::Matrix4d &matrix
+        ) const;
+
+        geometry_msgs::msg::Pose isometryToPose(
+            const Eigen::Isometry3d &pose
+        ) const;
+
+        Eigen::Matrix<double, 6, 6> makeInformationMatrix(
+            double weight
+        ) const;
+
+        std::pair<double, double> relativeDelta(
+            const Eigen::Isometry3d &a,
+            const Eigen::Isometry3d &b
+        ) const;
+
+        bool addKeyFrameToPoseGraph(
+            const LoopKeyFrame &keyframe
+        );
+
+        bool addLoopCandidateToPoseGraph(
+            const LoopCandidate &candidate
+        );
+
+        void optimizePoseGraphIfNeeded(
+            bool has_new_loop
+        );
+
         void storeKeyFrame(
             LoopKeyFrame &&keyframe
         );
 
         void publishLoopMarkers() const;
 
+        void publishOptimizedPath() const;
+
         rclcpp::Subscription<dlio::msg::KeyFrame>::SharedPtr sub_keyframe_;
         rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
             pub_loop_markers_;
+        rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr
+            pub_optimized_path_;
 
         std::unique_ptr<LidarIris> lidar_iris_;
         GicpMatcher gicp_matcher_;
+        PoseGraph pose_graph_;
         std::vector<LoopKeyFrame> keyframes_;
         std::vector<LoopCandidate> loop_candidates_;
 
         std::string keyframe_topic_ = "keyframe_msg";
         std::string marker_topic_ = "loop_candidates_marker";
+        std::string optimized_path_topic_ = "optimized_path";
         std::string marker_frame_ = "odom";
 
         bool loop_enable_ = true;
-        int loop_min_keyframe_gap_ = 30;
+        int loop_min_keyframe_gap_ = 0;
+        double loop_min_travel_distance_ = 8.0;
         float loop_iris_distance_thresh_ = 0.30F;
         bool loop_gicp_enable_ = true;
         double loop_gicp_score_thresh_ = 1.0;
@@ -120,11 +171,24 @@ namespace small_dlio {
         int loop_gicp_correspondence_randomness_ = 20;
         double loop_gicp_max_correspondence_distance_ = 1.0;
 
+        bool pgo_enable_ = false;
+        bool pgo_optimize_on_loop_ = true;
+        int pgo_max_iterations_ = 20;
+        double pgo_odom_edge_weight_ = 100.0;
+        double pgo_loop_edge_weight_ = 500.0;
+
         int iris_nscale_ = 4;
         int iris_min_wave_length_ = 18;
         float iris_mult_ = 1.6F;
         float iris_sigma_onf_ = 0.75F;
         int iris_match_num_ = 2;
+
+        uint64_t received_keyframes_ = 0;
+        uint64_t stored_keyframes_ = 0;
+        uint64_t iris_failures_ = 0;
+        uint64_t candidate_hits_ = 0;
+        uint64_t candidate_misses_ = 0;
+        double accumulated_travel_distance_ = 0.0;
     };
 
 } // namespace small_dlio

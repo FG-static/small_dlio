@@ -16,9 +16,10 @@
 #include <cmath>
 #include <deque>
 #include <memory>
+#include <rclcpp/logging.hpp>
 #include <vector>
 
-namespace small_dlio {
+namespace small_dlio { 
 
     OdomNode::OdomNode() : Node("small_dlio_odom") {
 
@@ -1140,8 +1141,8 @@ PROPAGATION:
             const auto frame_to_live_after = pose_delta(frame_state.pose, live_after.pose);
             const auto reg_before_to_frame = pose_delta(reg_before.pose, frame_state.pose);
             const auto reg_after_to_live_after = pose_delta(reg_after.pose, live_after.pose);
-            RCLCPP_INFO(
-                get_logger(),
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), *get_clock(), 2000,
                 "commit state: update_reg=%d score=%.4f frame_t=%.6f "
                 "live_before_to_frame_dp=%.3f dr=%.2f "
                 "frame_to_live_after_dp=%.3f dr=%.2f "
@@ -1426,8 +1427,8 @@ PROPAGATION:
 
         const auto imu_to_fused = pose_delta(imu_state.pose, fused_state.pose);
         const auto gicp_to_fused = pose_delta(gicp_pose, fused_state.pose);
-        RCLCPP_INFO(
-            get_logger(),
+        RCLCPP_INFO_THROTTLE(
+            get_logger(), *get_clock(), 2000,
             "gicp accepted: score=%.4f source=%zu target=%zu "
             "corr_t=%.3f corr_r=%.2f fuser_dt=%.6f weight=%.3f "
             "imu_to_gicp_dp=%.3f dr=%.2f imu_to_fused_dp=%.3f dr=%.2f gicp_to_fused_dp=%.3f dr=%.2f "
@@ -1583,6 +1584,15 @@ PROPAGATION:
         msg.cloud.header.frame_id = lidar_frame_;
 
         pub_keyframe_msg_->publish(msg);
+        RCLCPP_INFO_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "Published keyframe_msg: id=%u score=%.4f cloud=%zu "
+            "pose=[%.3f %.3f %.3f]",
+            id,
+            alignment_score,
+            local_cloud->size(),
+            pose.p.x(), pose.p.y(), pose.p.z()
+        );
     }
 
     void OdomNode::publishLiveState() {

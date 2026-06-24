@@ -31,6 +31,10 @@ find_package(PCL REQUIRED COMPONENTS common filters kdtree)
 find_package(small_gicp REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(OpenMP REQUIRED)
+find_library(G2O_CORE_LIBRARY g2o_core REQUIRED)
+find_library(G2O_STUFF_LIBRARY g2o_stuff REQUIRED)
+find_library(G2O_TYPES_SLAM3D_LIBRARY g2o_types_slam3d REQUIRED)
+find_library(G2O_SOLVER_EIGEN_LIBRARY g2o_solver_eigen REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/KeyFrame.msg"
@@ -74,6 +78,25 @@ target_link_libraries(small_dlio_gicp
     Eigen3::Eigen
     ${PCL_LIBRARIES}
     small_gicp::small_gicp
+)
+
+add_library(small_dlio_pose_graph STATIC
+  src/pose_graph.cpp
+)
+
+target_include_directories(small_dlio_pose_graph
+  PUBLIC
+    include
+    include/small_dlio
+)
+
+target_link_libraries(small_dlio_pose_graph
+  PUBLIC
+    Eigen3::Eigen
+    ${G2O_CORE_LIBRARY}
+    ${G2O_STUFF_LIBRARY}
+    ${G2O_TYPES_SLAM3D_LIBRARY}
+    ${G2O_SOLVER_EIGEN_LIBRARY}
 )
 
 add_executable(dlio_node
@@ -126,6 +149,7 @@ ament_target_dependencies(loop_detector_node
   sensor_msgs
   std_msgs
   geometry_msgs
+  nav_msgs
   visualization_msgs
   pcl_conversions
 )
@@ -143,6 +167,7 @@ target_link_libraries(loop_detector_node
   ${PCL_LIBRARIES}
   ${OpenCV_LIBS}
   small_dlio_gicp
+  small_dlio_pose_graph
   lidar_iris_vendor
   "${cpp_typesupport_target}"
 )

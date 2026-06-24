@@ -172,7 +172,7 @@ void LidarIris::LoGFeatureEncode(const cv::Mat1b &src, unsigned int nscale, int 
 LidarIris::FeatureDesc LidarIris::GetFeature(const cv::Mat1b &src)
 {
     FeatureDesc desc;
-    desc.img = src;
+    desc.img = src.clone();
     LoGFeatureEncode(src, _nscale, _minWaveLength, _mult, _sigmaOnf, desc.T, desc.M);
     return desc;
 }
