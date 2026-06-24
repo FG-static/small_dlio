@@ -14,12 +14,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <rclcpp/logging.hpp>
 #include <vector>
 
-namespace small_dlio { 
+namespace small_dlio {
 
     OdomNode::OdomNode() : Node("small_dlio_odom") {
 
@@ -126,6 +128,7 @@ namespace small_dlio {
         // Topics
         declare_param("imu_topic", imu_topic_, std::string("/livox/imu"));
         declare_param("cloud_topic", cloud_topic_, std::string("/livox/lidar"));
+        declare_param("cloud_accumulate_interval_sec", cloud_accumulate_interval_sec_, 0.1);
 
         // Extrinsics: body -> IMU
         std::vector<double> t_body_imu_default = {0.0, 0.0, 0.0};
@@ -812,6 +815,84 @@ PROPAGATION:
     void OdomNode::callbackLivoxCloud(
         const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg
     ) {
+
+        cloud_accumulator_.push_back(msg);
+
+        auto stamp_to_ns = [](const auto &stamp) -> int64_t {
+            return static_cast<int64_t>(stamp.sec) * 1000000000LL
+                + static_cast<int64_t>(stamp.nanosec);
+        };
+
+        int64_t first_point_ns = std::numeric_limits<int64_t>::max();
+        int64_t last_point_ns = std::numeric_limits<int64_t>::min();
+        size_t total_points = 0;
+        for (const auto &sub : cloud_accumulator_) {
+
+            const int64_t sub_stamp_ns = stamp_to_ns(sub->header.stamp);
+            total_points += sub->points.size();
+
+            for (const auto &pt : sub->points) {
+
+                const int64_t point_ns =
+                    sub_stamp_ns + static_cast<int64_t>(pt.offset_time);
+                first_point_ns = std::min(first_point_ns, point_ns);
+                last_point_ns = std::max(last_point_ns, point_ns);
+            }
+        }
+
+        if (total_points == 0) {
+
+            cloud_accumulator_.clear();
+            return;
+        }
+
+        const double accumulated_span =
+            static_cast<double>(last_point_ns - first_point_ns) * 1e-9;
+        if (accumulated_span < cloud_accumulate_interval_sec_)
+            return;
+
+        // 合并所有 sub-scan 到一条 CustomMsg
+        auto merged = std::make_shared<livox_ros_driver2::msg::CustomMsg>();
+        merged->header = cloud_accumulator_.front()->header;
+        merged->header.stamp.sec = static_cast<int32_t>(
+            first_point_ns / 1000000000LL);
+        merged->header.stamp.nanosec = static_cast<uint32_t>(
+            first_point_ns % 1000000000LL);
+        merged->lidar_id = cloud_accumulator_.front()->lidar_id;
+        merged->timebase = cloud_accumulator_.front()->timebase;
+
+        merged->points.reserve(total_points);
+
+        for (const auto &sub : cloud_accumulator_) {
+
+            const int64_t sub_stamp_ns = stamp_to_ns(sub->header.stamp);
+
+            for (auto pt : sub->points) {
+
+                // offset_time is rewritten relative to the accumulated scan start.
+                const int64_t point_ns =
+                    sub_stamp_ns + static_cast<int64_t>(pt.offset_time);
+                const int64_t rel_ns = point_ns - first_point_ns;
+                if (rel_ns < 0LL ||
+                    rel_ns > static_cast<int64_t>(
+                        std::numeric_limits<decltype(pt.offset_time)>::max()))
+                    continue;
+
+                pt.offset_time = static_cast<decltype(pt.offset_time)>(rel_ns);
+                merged->points.push_back(pt);
+            }
+        }
+        merged->point_num = static_cast<uint32_t>(merged->points.size());
+
+        cloud_accumulator_.clear();
+
+        processAccumulatedCloud(merged);
+    }
+
+    void OdomNode::processAccumulatedCloud(
+        const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg
+    ) {
+
         auto pose_delta = [](const Pose &from, const Pose &to) {
             Eigen::Quaterniond dq = (from.q.conjugate() * to.q).normalized();
             if (dq.w() < 0.0)

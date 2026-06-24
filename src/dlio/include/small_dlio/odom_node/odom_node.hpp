@@ -25,6 +25,13 @@ namespace small_dlio {
         void callbackLivoxCloud(
             const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg
         );
+        void processAccumulatedCloud(
+            const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg
+        );
+
+        // 点云累积
+        std::vector<livox_ros_driver2::msg::CustomMsg::SharedPtr> cloud_accumulator_;
+        double cloud_accumulate_interval_sec_ = 0.1;
 
         void publishOdometry(
             const State &state,
