@@ -39,19 +39,38 @@ namespace small_dlio {
         tf_broadcaster_ = std:: make_unique<tf2_ros::TransformBroadcaster>(*this);
         static_tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
 
-        // 静态 TF: body -> livox_frame (外参固定，只发一次)
-        geometry_msgs::msg::TransformStamped static_tf;
-        static_tf.header.stamp = now();
-        static_tf.header.frame_id = body_frame_;
-        static_tf.child_frame_id = lidar_frame_;
-        static_tf.transform.translation.x = extrinsics_.t_body_lidar.x();
-        static_tf.transform.translation.y = extrinsics_.t_body_lidar.y();
-        static_tf.transform.translation.z = extrinsics_.t_body_lidar.z();
-        static_tf.transform.rotation.w = extrinsics_.q_body_lidar.w();
-        static_tf.transform.rotation.x = extrinsics_.q_body_lidar.x();
-        static_tf.transform.rotation.y = extrinsics_.q_body_lidar.y();
-        static_tf.transform.rotation.z = extrinsics_.q_body_lidar.z();
-        static_tf_broadcaster_->sendTransform(static_tf);
+        auto make_static_tf = [this](
+            const std::string &child_frame,
+            const Eigen::Vector3d &translation,
+            const Eigen::Quaterniond &rotation
+        ) {
+
+            geometry_msgs::msg::TransformStamped tf;
+            tf.header.stamp = now();
+            tf.header.frame_id = body_frame_;
+            tf.child_frame_id = child_frame;
+            tf.transform.translation.x = translation.x();
+            tf.transform.translation.y = translation.y();
+            tf.transform.translation.z = translation.z();
+            tf.transform.rotation.w = rotation.w();
+            tf.transform.rotation.x = rotation.x();
+            tf.transform.rotation.y = rotation.y();
+            tf.transform.rotation.z = rotation.z();
+            return tf;
+        };
+
+        std::vector<geometry_msgs::msg::TransformStamped> static_tfs;
+        static_tfs.push_back(make_static_tf(
+            imu_frame_,
+            extrinsics_.t_body_imu,
+            extrinsics_.q_body_imu
+        ));
+        static_tfs.push_back(make_static_tf(
+            lidar_frame_,
+            extrinsics_.t_body_lidar,
+            extrinsics_.q_body_lidar
+        ));
+        static_tf_broadcaster_->sendTransform(static_tfs);
 
         imu_cb_group_ = create_callback_group(
             rclcpp::CallbackGroupType::MutuallyExclusive
@@ -125,6 +144,7 @@ namespace small_dlio {
         // Frames
         declare_param("odom_frame", odom_frame_, std::string("odom"));
         declare_param("body_frame", body_frame_, std::string("body"));
+        declare_param("imu_frame", imu_frame_, std::string("imu"));
         declare_param("lidar_frame", lidar_frame_, std::string("livox_frame"));
 
         // Topics
@@ -132,27 +152,123 @@ namespace small_dlio {
         declare_param("cloud_topic", cloud_topic_, std::string("/livox/lidar"));
         declare_param("cloud_accumulate_interval_sec", cloud_accumulate_interval_sec_, 0.1);
 
-        // Extrinsics: body -> IMU
-        std::vector<double> t_body_imu_default = {0.0, 0.0, 0.0};
-        std::vector<double> q_body_imu_default = {1.0, 0.0, 0.0, 0.0};
-        std::vector<double> t_body_imu, q_body_imu;
-        this->declare_parameter("t_body_imu", t_body_imu_default);
-        this->get_parameter("t_body_imu", t_body_imu);
-        this->declare_parameter("q_body_imu", q_body_imu_default);
-        this->get_parameter("q_body_imu", q_body_imu);
-        extrinsics_.t_body_imu = Eigen::Vector3d(t_body_imu[0], t_body_imu[1], t_body_imu[2]);
-        extrinsics_.q_body_imu = Eigen::Quaterniond(q_body_imu[0], q_body_imu[1], q_body_imu[2], q_body_imu[3]);
+        auto read_extrinsic = [this](
+            const std::string &name,
+            const std::string &translation_param,
+            const std::string &quaternion_param,
+            Eigen::Vector3d &translation,
+            Eigen::Quaterniond &quaternion
+        ) {
 
-        // Extrinsics: body -> LiDAR
-        std::vector<double> t_body_lidar_default = {0.0, 0.0, 0.0};
-        std::vector<double> q_body_lidar_default = {1.0, 0.0, 0.0, 0.0};
-        std::vector<double> t_body_lidar, q_body_lidar;
-        this->declare_parameter("t_body_lidar", t_body_lidar_default);
-        this->get_parameter("t_body_lidar", t_body_lidar);
-        this->declare_parameter("q_body_lidar", q_body_lidar_default);
-        this->get_parameter("q_body_lidar", q_body_lidar);
-        extrinsics_.t_body_lidar = Eigen::Vector3d(t_body_lidar[0], t_body_lidar[1], t_body_lidar[2]);
-        extrinsics_.q_body_lidar = Eigen::Quaterniond(q_body_lidar[0], q_body_lidar[1], q_body_lidar[2], q_body_lidar[3]);
+            std::vector<double> t_default = {0.0, 0.0, 0.0};
+            std::vector<double> q_default = {1.0, 0.0, 0.0, 0.0};
+            std::vector<double> t, q, matrix;
+
+            this->declare_parameter(translation_param, t_default);
+            this->get_parameter(translation_param, t);
+            this->declare_parameter(quaternion_param, q_default);
+            this->get_parameter(quaternion_param, q);
+            this->declare_parameter(name, std::vector<double>{});
+            this->get_parameter(name, matrix);
+
+            translation.setZero();
+            quaternion.setIdentity();
+
+            if (t.size() == 3) {
+                translation = Eigen::Vector3d(t[0], t[1], t[2]);
+            } else {
+                RCLCPP_WARN(
+                    get_logger(),
+                    "%s must have 3 elements, got %zu; using zero translation",
+                    translation_param.c_str(),
+                    t.size()
+                );
+            }
+
+            if (q.size() == 4) {
+                quaternion = Eigen::Quaterniond(q[0], q[1], q[2], q[3]);
+            } else {
+                RCLCPP_WARN(
+                    get_logger(),
+                    "%s must have 4 elements [w,x,y,z], got %zu; using identity rotation",
+                    quaternion_param.c_str(),
+                    q.size()
+                );
+            }
+
+            if (matrix.size() == 16) {
+
+                Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
+                for (int r = 0; r < 4; ++r)
+                    for (int c = 0; c < 4; ++c)
+                        T(r, c) = matrix[static_cast<size_t>(r * 4 + c)];
+
+                if (T.allFinite()) {
+                    translation = T.block<3, 1>(0, 3);
+                    quaternion = Eigen::Quaterniond(T.block<3, 3>(0, 0));
+                } else {
+                    RCLCPP_WARN(
+                        get_logger(),
+                        "%s contains non-finite values; falling back to %s/%s",
+                        name.c_str(),
+                        translation_param.c_str(),
+                        quaternion_param.c_str()
+                    );
+                }
+            } else if (!matrix.empty()) {
+
+                RCLCPP_WARN(
+                    get_logger(),
+                    "%s must be a row-major 4x4 matrix with 16 elements, got %zu; "
+                    "falling back to %s/%s",
+                    name.c_str(),
+                    matrix.size(),
+                    translation_param.c_str(),
+                    quaternion_param.c_str()
+                );
+            }
+
+            if (!translation.allFinite() ||
+                !quaternion.coeffs().allFinite() ||
+                quaternion.norm() < 1e-9) {
+
+                RCLCPP_WARN(
+                    get_logger(),
+                    "%s extrinsic is invalid; using identity",
+                    name.c_str()
+                );
+                translation.setZero();
+                quaternion.setIdentity();
+            } else {
+
+                quaternion.normalize();
+            }
+
+            RCLCPP_INFO(
+                get_logger(),
+                "%s: t=[%.6f %.6f %.6f] q=[%.6f %.6f %.6f %.6f]",
+                name.c_str(),
+                translation.x(), translation.y(), translation.z(),
+                quaternion.w(), quaternion.x(), quaternion.y(), quaternion.z()
+            );
+        };
+
+        // Extrinsics are body -> sensor. Optional T_body_* matrices override
+        // t_body_* + q_body_* when provided as row-major 4x4 arrays.
+        read_extrinsic(
+            "T_body_imu",
+            "t_body_imu",
+            "q_body_imu",
+            extrinsics_.t_body_imu,
+            extrinsics_.q_body_imu
+        );
+        read_extrinsic(
+            "T_body_lidar",
+            "t_body_lidar",
+            "q_body_lidar",
+            extrinsics_.t_body_lidar,
+            extrinsics_.q_body_lidar
+        );
 
         // Gravity
         std::vector<double> gravity_default = {0.0, 0.0, 9.8};
@@ -1683,7 +1799,7 @@ PROPAGATION:
 
         pcl::toROSMsg(*local_cloud, msg.cloud);
         msg.cloud.header.stamp = stamp;
-        msg.cloud.header.frame_id = lidar_frame_;
+        msg.cloud.header.frame_id = body_frame_;
 
         pub_keyframe_msg_->publish(msg);
         RCLCPP_INFO_THROTTLE(

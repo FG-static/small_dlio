@@ -11,6 +11,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
+#include "dlio/msg/optimized_key_frames.hpp"
 
 #include <Eigen/Core>
 
@@ -18,6 +19,7 @@
 #include <pcl/point_types.h>
 
 #include <memory>
+#include <rclcpp/publisher.hpp>
 #include <string>
 #include <vector>
 
@@ -57,6 +59,8 @@ namespace small_dlio {
         };
 
         void loadParams();
+
+        void publishOptimizedKeyFrames() const;
 
         void callbackKeyFrame(
             const dlio::msg::KeyFrame::SharedPtr msg
@@ -153,7 +157,10 @@ namespace small_dlio {
         PoseGraph pose_graph_;
         std::vector<LoopKeyFrame> keyframes_;
         std::vector<LoopCandidate> loop_candidates_;
+        rclcpp::Publisher<dlio::msg::OptimizedKeyFrames>::SharedPtr
+            pub_optimized_keyframes_;
 
+        std::string optimized_keyframes_topic_ = "optimized_keyframes";
         std::string keyframe_topic_ = "keyframe_msg";
         std::string marker_topic_ = "loop_candidates_marker";
         std::string optimized_path_topic_ = "optimized_path";
@@ -170,6 +177,10 @@ namespace small_dlio {
         int loop_gicp_num_threads_ = 4;
         int loop_gicp_correspondence_randomness_ = 20;
         double loop_gicp_max_correspondence_distance_ = 1.0;
+        std::string body_frame_ = "body";
+        std::string lidar_frame_ = "livox_frame";
+        Eigen::Isometry3d T_body_lidar_ = Eigen::Isometry3d::Identity();
+        Eigen::Isometry3d T_lidar_body_ = Eigen::Isometry3d::Identity();
 
         bool pgo_enable_ = false;
         bool pgo_optimize_on_loop_ = true;

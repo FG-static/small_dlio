@@ -3,7 +3,17 @@ small_dlio_loop_detector:
         keyframe_topic: "/keyframe_msg"
         marker_topic: "/loop_candidates_marker"
         optimized_path_topic: "/optimized_path"
+        optimized_keyframes_topic: "/optimized_keyframes"
         marker_frame: "odom"
+        body_frame: "body"
+        lidar_frame: "livox_frame"
+        t_body_lidar: [0.0, 0.0, 0.0]
+        q_body_lidar: [1.0, 0.0, 0.0, 0.0]
+        # Optional row-major 4x4 matrix. If provided, it overrides t_body_lidar/q_body_lidar.
+        # T_body_lidar: [1.0, 0.0, 0.0, 0.0,
+        #                0.0, 1.0, 0.0, 0.0,
+        #                0.0, 0.0, 1.0, 0.0,
+        #                0.0, 0.0, 0.0, 1.0]
         loop_enable: true
         loop_min_keyframe_gap: 0
         loop_min_travel_distance: 8.0

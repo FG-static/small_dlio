@@ -38,6 +38,7 @@ find_library(G2O_SOLVER_EIGEN_LIBRARY g2o_solver_eigen REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/KeyFrame.msg"
+  "msg/OptimizedKeyFrames.msg"
   DEPENDENCIES
     std_msgs
     geometry_msgs

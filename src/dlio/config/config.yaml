@@ -3,6 +3,7 @@ small_dlio_odom:
         # ========== Frame IDs ==========
         odom_frame: "odom"
         body_frame: "body"
+        imu_frame: "imu"
         lidar_frame: "livox_frame"
 
         # ========== Topics ==========
@@ -14,10 +15,20 @@ small_dlio_odom:
         # body -> IMU
         t_body_imu: [0.0, 0.0, 0.0]
         q_body_imu: [1.0, 0.0, 0.0, 0.0] # w, x, y, z
+        # Optional row-major 4x4 matrix. If provided, it overrides t_body_imu/q_body_imu.
+        # T_body_imu: [1.0, 0.0, 0.0, 0.0,
+        #              0.0, 1.0, 0.0, 0.0,
+        #              0.0, 0.0, 1.0, 0.0,
+        #              0.0, 0.0, 0.0, 1.0]
 
         # body -> LiDAR
         t_body_lidar: [0.0, 0.0, 0.0]
         q_body_lidar: [1.0, 0.0, 0.0, 0.0]
+        # Optional row-major 4x4 matrix. If provided, it overrides t_body_lidar/q_body_lidar.
+        # T_body_lidar: [1.0, 0.0, 0.0, 0.0,
+        #                0.0, 1.0, 0.0, 0.0,
+        #                0.0, 0.0, 1.0, 0.0,
+        #                0.0, 0.0, 0.0, 1.0]
 
         # ========== Gravity ==========
         gravity: [0.0, 0.0, 9.8]
@@ -29,7 +40,7 @@ small_dlio_odom:
 
         # ========== Keyframe Detection ==========
         kf_trans_thresh: 0.1 # meters
-        kf_rot_thresh: 0.1 # radians (~5~7 deg)
+        kf_rot_thresh: 0.05 # radians (~2~4 deg)
         max_alignment_score: 3.0
 
         # ========== Submap (kd-tree) ==========
@@ -43,10 +54,10 @@ small_dlio_odom:
         gicp_correspondence_randomness: 20
         gicp_max_correspondence_distance: 1.0
         gicp_reject_reset_threshold: 3
-        gicp_max_correction_trans: 4.0 # meters, norm of T_corr translation
-        gicp_max_correction_rot_deg: 15.0 # degrees, rotation of T_corr
-        gicp_max_imu_to_gicp_trans: 4.0 # meters, imu prior to gicp pose
-        gicp_max_imu_to_gicp_rot_deg: 15.0 # degrees, imu prior to gicp pose
+        gicp_max_correction_trans: 5.0 # meters, norm of T_corr translation
+        gicp_max_correction_rot_deg: 30.0 # degrees, rotation of T_corr
+        gicp_max_imu_to_gicp_trans: 5.0 # meters, imu prior to gicp pose
+        gicp_max_imu_to_gicp_rot_deg: 30.0 # degrees, imu prior to gicp pose
         gicp_use_previous_transform_guess: false # use previous accepted T_corr as next GICP initial guess
 
         # ========== Geometric Observer Gains ==========
@@ -62,14 +73,24 @@ small_dlio_odom:
         geo_max_velocity: 20.0 # m/s, absolute velocity guard
 
         # ========== Map ==========
-        map_leaf_size: 0.70
+        map_leaf_size: 0.20
         map_topic: "/global_map"
         keyframe_topic: "/keyframe_msg"
 
 map_node:
     ros__parameters:
-        map_leaf_size: 0.70
+        map_leaf_size: 0.20
         map_topic: "/global_map"
         keyframe_topic: "/keyframe_msg"
+        optimized_keyframes_topic: "/optimized_keyframes"
+        body_frame: "body"
+        lidar_frame: "livox_frame"
+        t_body_lidar: [0.0, 0.0, 0.0]
+        q_body_lidar: [1.0, 0.0, 0.0, 0.0]
+        # Optional row-major 4x4 matrix. If provided, it overrides t_body_lidar/q_body_lidar.
+        # T_body_lidar: [1.0, 0.0, 0.0, 0.0,
+        #                0.0, 1.0, 0.0, 0.0,
+        #                0.0, 0.0, 1.0, 0.0,
+        #                0.0, 0.0, 0.0, 1.0]
         save_map_service_name: "/save_map"
         map_save_path: "/home/goose/small_dlio/global_map.pcd"

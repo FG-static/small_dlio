@@ -1,12 +1,16 @@
 #include "loop_detector_node.hpp"
 
+#include "dlio/msg/optimized_key_frames.hpp"
 #include "geometry_msgs/msg/point.hpp"
 #include "pcl_conversions/pcl_conversions.h"
 
 #include <Eigen/Geometry>
 
 #include <cmath>
+#include <cstdint>
 #include <limits>
+#include <pcl/common/transforms.h>
+#include <rclcpp/qos_overriding_options.hpp>
 #include <utility>
 
 namespace small_dlio {
@@ -56,6 +60,12 @@ namespace small_dlio {
                 rclcpp::QoS(1).transient_local().reliable()
             );
 
+        pub_optimized_keyframes_ =
+            create_publisher<dlio::msg::OptimizedKeyFrames>(
+                optimized_keyframes_topic_,
+                rclcpp::QoS(1).reliable().transient_local()
+            );
+
         RCLCPP_INFO(
             get_logger(),
             "Loop detector backend: loop_gicp_enable=%d pgo_enable=%d "
@@ -89,6 +99,8 @@ namespace small_dlio {
         declare_parameter(
             "loop_gicp_max_correspondence_distance",
             loop_gicp_max_correspondence_distance_);
+        declare_parameter("body_frame", body_frame_);
+        declare_parameter("lidar_frame", lidar_frame_);
         declare_parameter("pgo_enable", pgo_enable_);
         declare_parameter("pgo_optimize_on_loop", pgo_optimize_on_loop_);
         declare_parameter("pgo_max_iterations", pgo_max_iterations_);
@@ -99,6 +111,7 @@ namespace small_dlio {
         declare_parameter("iris_mult", iris_mult_);
         declare_parameter("iris_sigma_onf", iris_sigma_onf_);
         declare_parameter("iris_match_num", iris_match_num_);
+        declare_parameter("optimized_keyframes_topic", optimized_keyframes_topic_);
 
         get_parameter("keyframe_topic", keyframe_topic_);
         get_parameter("marker_topic", marker_topic_);
@@ -119,6 +132,8 @@ namespace small_dlio {
         get_parameter(
             "loop_gicp_max_correspondence_distance",
             loop_gicp_max_correspondence_distance_);
+        get_parameter("body_frame", body_frame_);
+        get_parameter("lidar_frame", lidar_frame_);
         get_parameter("pgo_enable", pgo_enable_);
         get_parameter("pgo_optimize_on_loop", pgo_optimize_on_loop_);
         get_parameter("pgo_max_iterations", pgo_max_iterations_);
@@ -129,6 +144,96 @@ namespace small_dlio {
         get_parameter("iris_mult", iris_mult_);
         get_parameter("iris_sigma_onf", iris_sigma_onf_);
         get_parameter("iris_match_num", iris_match_num_);
+        get_parameter("optimized_keyframes_topic", optimized_keyframes_topic_);
+
+        auto read_body_lidar_extrinsic = [this]() {
+            const std::vector<double> t_default = {0.0, 0.0, 0.0};
+            const std::vector<double> q_default = {1.0, 0.0, 0.0, 0.0};
+            std::vector<double> t, q, matrix;
+
+            declare_parameter("t_body_lidar", t_default);
+            get_parameter("t_body_lidar", t);
+            declare_parameter("q_body_lidar", q_default);
+            get_parameter("q_body_lidar", q);
+            declare_parameter("T_body_lidar", std::vector<double>{});
+            get_parameter("T_body_lidar", matrix);
+
+            Eigen::Vector3d translation = Eigen::Vector3d::Zero();
+            Eigen::Quaterniond rotation = Eigen::Quaterniond::Identity();
+
+            if (t.size() == 3) {
+                translation = Eigen::Vector3d(t[0], t[1], t[2]);
+            } else {
+                RCLCPP_WARN(
+                    get_logger(),
+                    "t_body_lidar must have 3 elements, got %zu; using zero translation",
+                    t.size()
+                );
+            }
+
+            if (q.size() == 4) {
+                rotation = Eigen::Quaterniond(q[0], q[1], q[2], q[3]);
+            } else {
+                RCLCPP_WARN(
+                    get_logger(),
+                    "q_body_lidar must have 4 elements [w,x,y,z], got %zu; using identity rotation",
+                    q.size()
+                );
+            }
+
+            if (matrix.size() == 16) {
+                Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
+                for (int r = 0; r < 4; ++r)
+                    for (int c = 0; c < 4; ++c)
+                        T(r, c) = matrix[static_cast<size_t>(r * 4 + c)];
+
+                if (T.allFinite()) {
+                    translation = T.block<3, 1>(0, 3);
+                    rotation = Eigen::Quaterniond(T.block<3, 3>(0, 0));
+                } else {
+                    RCLCPP_WARN(
+                        get_logger(),
+                        "T_body_lidar contains non-finite values; falling back to t_body_lidar/q_body_lidar"
+                    );
+                }
+            } else if (!matrix.empty()) {
+                RCLCPP_WARN(
+                    get_logger(),
+                    "T_body_lidar must be a row-major 4x4 matrix with 16 elements, got %zu; "
+                    "falling back to t_body_lidar/q_body_lidar",
+                    matrix.size()
+                );
+            }
+
+            if (!translation.allFinite() ||
+                !rotation.coeffs().allFinite() ||
+                rotation.norm() < 1e-9) {
+
+                RCLCPP_WARN(
+                    get_logger(),
+                    "body->lidar extrinsic is invalid; using identity"
+                );
+                translation.setZero();
+                rotation.setIdentity();
+            } else {
+
+                rotation.normalize();
+            }
+
+            T_body_lidar_ = Eigen::Isometry3d::Identity();
+            T_body_lidar_.linear() = rotation.toRotationMatrix();
+            T_body_lidar_.translation() = translation;
+            T_lidar_body_ = T_body_lidar_.inverse();
+
+            RCLCPP_INFO(
+                get_logger(),
+                "Loop backend T_body_lidar: t=[%.6f %.6f %.6f] q=[%.6f %.6f %.6f %.6f]",
+                translation.x(), translation.y(), translation.z(),
+                rotation.w(), rotation.x(), rotation.y(), rotation.z()
+            );
+        };
+
+        read_body_lidar_extrinsic();
     }
 
     void LoopDetectorNode::callbackKeyFrame(
@@ -290,15 +395,40 @@ namespace small_dlio {
         LoopKeyFrame &keyframe
     ) const {
 
-        auto cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-        pcl::fromROSMsg(msg.cloud, *cloud);
+        auto cloud_body = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        pcl::fromROSMsg(msg.cloud, *cloud_body);
 
-        if (cloud->empty()) return false;
+        if (cloud_body->empty()) return false;
+
+        auto cloud_lidar = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        const std::string &frame_id = msg.cloud.header.frame_id;
+        if (frame_id == lidar_frame_) {
+
+            cloud_lidar = cloud_body;
+        } else {
+
+            if (!frame_id.empty() && frame_id != body_frame_) {
+                RCLCPP_WARN_THROTTLE(
+                    get_logger(), *get_clock(), 2000,
+                    "Keyframe cloud frame '%s' is neither '%s' nor '%s'; treating it as body frame",
+                    frame_id.c_str(),
+                    body_frame_.c_str(),
+                    lidar_frame_.c_str()
+                );
+            }
+            pcl::transformPointCloud(
+                *cloud_body,
+                *cloud_lidar,
+                T_lidar_body_.matrix().cast<float>()
+            );
+        }
+
+        if (cloud_lidar->empty()) return false;
 
         keyframe.id = msg.id;
         keyframe.stamp = rclcpp::Time(msg.header.stamp);
         keyframe.pose = msg.pose;
-        keyframe.cloud = cloud;
+        keyframe.cloud = cloud_lidar;
         return true;
     }
 
@@ -440,8 +570,20 @@ namespace small_dlio {
             return std::make_pair(corr_t, corr_r_deg);
         };
 
-        const Eigen::Matrix4d init_guess =
-            T_world_history.inverse() * T_world_current;
+        // body 下 history -> current 的相对变化
+        const Eigen::Isometry3d body_history_from_current =
+            matrixToIsometry(T_world_history.inverse() * T_world_current);
+        if (!body_history_from_current.matrix().allFinite())
+            return false;
+
+        // 三明治乘法转化为 lidar 下 history -> current
+        const Eigen::Isometry3d lidar_history_from_current =
+            T_lidar_body_ * body_history_from_current * T_body_lidar_;
+        if (!lidar_history_from_current.matrix().allFinite())
+            return false;
+
+        // 这里的 gicp 主要是对齐两个直接从 lidar 上获取的点云（一个是 history 一个是 current）
+        const Eigen::Matrix4d init_guess = lidar_history_from_current.matrix();
         const double odom_yaw = yaw_from_matrix(init_guess);
         const double iris_yaw =
             static_cast<double>(candidate.yaw_bias) * M_PI / 180.0;
@@ -731,9 +873,17 @@ namespace small_dlio {
             !candidate.source_to_target.allFinite())
             return false;
 
-        const Eigen::Isometry3d history_from_current =
+        // 三明治乘法转回 body
+        const Eigen::Isometry3d history_lidar_from_current_lidar =
             matrixToIsometry(candidate.source_to_target);
-        if (!history_from_current.matrix().allFinite())
+        if (!history_lidar_from_current_lidar.matrix().allFinite())
+            return false;
+
+        const Eigen::Isometry3d history_body_from_current_body =
+            T_body_lidar_ *
+            history_lidar_from_current_lidar *
+            T_lidar_body_;
+        if (!history_body_from_current_body.matrix().allFinite())
             return false;
 
         const auto *history = findKeyFrame(candidate.history_id);
@@ -744,9 +894,12 @@ namespace small_dlio {
         const Eigen::Isometry3d odom_history_from_current =
             poseToIsometry(history->pose).inverse() * poseToIsometry(current->pose);
         const auto direct_delta =
-            relativeDelta(odom_history_from_current, history_from_current);
+            relativeDelta(odom_history_from_current, history_body_from_current_body);
         const auto inverse_delta =
-            relativeDelta(odom_history_from_current, history_from_current.inverse());
+            relativeDelta(
+                odom_history_from_current,
+                history_body_from_current_body.inverse()
+            );
 
         RCLCPP_INFO(
             get_logger(),
@@ -761,18 +914,18 @@ namespace small_dlio {
             direct_delta.second,
             inverse_delta.first,
             inverse_delta.second,
-            history_from_current.translation().x(),
-            history_from_current.translation().y(),
-            history_from_current.translation().z(),
-            history_from_current.inverse().translation().x(),
-            history_from_current.inverse().translation().y(),
-            history_from_current.inverse().translation().z()
+            history_body_from_current_body.translation().x(),
+            history_body_from_current_body.translation().y(),
+            history_body_from_current_body.translation().z(),
+            history_body_from_current_body.inverse().translation().x(),
+            history_body_from_current_body.inverse().translation().y(),
+            history_body_from_current_body.inverse().translation().z()
         );
 
         return pose_graph_.addLoopEdge(
             candidate.history_id,
             candidate.current_id,
-            history_from_current,
+            history_body_from_current_body,
             makeInformationMatrix(pgo_loop_edge_weight_),
             candidate.gicp_score
         );
@@ -809,6 +962,47 @@ namespace small_dlio {
             summary.initial_chi2,
             summary.final_chi2
         );
+        publishOptimizedKeyFrames();
+    }
+
+    void LoopDetectorNode::publishOptimizedKeyFrames() const {
+
+        if (!pub_optimized_keyframes_ || pose_graph_.empty())
+            return;
+
+        dlio::msg::OptimizedKeyFrames msg;
+        msg.header.frame_id = marker_frame_;
+        msg.ids.reserve(pose_graph_.nodeCount());
+        msg.poses.reserve(pose_graph_.nodeCount());
+
+        double latest_stamp = 0.0;
+        for (const auto &node : pose_graph_.nodes()) {
+            if (!node.pose.matrix().allFinite())
+                continue;
+
+            msg.ids.push_back(node.id);
+            msg.poses.push_back(isometryToPose(node.pose));
+            if (std::isfinite(node.stamp) && node.stamp > latest_stamp)
+                latest_stamp = node.stamp;
+        }
+
+        if (latest_stamp > 0.0) {
+
+            const auto stamp_ns =
+                static_cast<int64_t>(latest_stamp * 1000000000.0);
+            msg.header.stamp.sec =
+                static_cast<int32_t>(stamp_ns / 1000000000LL);
+            msg.header.stamp.nanosec =
+                static_cast<uint32_t>(stamp_ns % 1000000000LL);
+        } else {
+
+            msg.header.stamp = now();
+        }
+
+        if (msg.ids.empty())
+            return;
+
+        pub_optimized_keyframes_->publish(msg);
     }
 
     void LoopDetectorNode::storeKeyFrame(

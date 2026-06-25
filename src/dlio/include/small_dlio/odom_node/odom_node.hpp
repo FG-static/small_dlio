@@ -188,6 +188,7 @@ namespace small_dlio {
         std::string cloud_topic_ = "/livox/lidar";
         std::string odom_frame_ = "odom";
         std::string body_frame_ = "body";
+        std::string imu_frame_ = "imu";
         std::string lidar_frame_ = "livox_frame";
 
         // Imu Calibrate
