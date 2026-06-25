@@ -217,6 +217,7 @@ namespace small_dlio {
         double gicp_max_correction_rot_deg_ = 8.0;
         double gicp_max_imu_to_gicp_trans_ = 0.8;
         double gicp_max_imu_to_gicp_rot_deg_ = 8.0;
+        bool gicp_use_previous_transform_guess_ = false;
         Eigen::Matrix4d prev_T_gicp_ = Eigen::Matrix4d::Identity();
 
         // Geometric observer

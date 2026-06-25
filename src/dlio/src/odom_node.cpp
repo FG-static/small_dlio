@@ -12,12 +12,14 @@
 #include "rclcpp/utilities.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include <algorithm>
+#include <boost/mpl/pair.hpp>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <deque>
 #include <limits>
 #include <memory>
+#include <pcl/common/transforms.h>
 #include <rclcpp/logging.hpp>
 #include <vector>
 
@@ -188,6 +190,7 @@ namespace small_dlio {
         declare_param("gicp_max_correction_rot_deg", gicp_max_correction_rot_deg_, 8.0);
         declare_param("gicp_max_imu_to_gicp_trans", gicp_max_imu_to_gicp_trans_, 0.8);
         declare_param("gicp_max_imu_to_gicp_rot_deg", gicp_max_imu_to_gicp_rot_deg_, 8.0);
+        declare_param("gicp_use_previous_transform_guess", gicp_use_previous_transform_guess_, false);
 
         gicp_matcher_.configure(GicpParams{
             gicp_num_threads_,
@@ -889,6 +892,7 @@ PROPAGATION:
         processAccumulatedCloud(merged);
     }
 
+    // 处理积累点云 原点云回调函数
     void OdomNode::processAccumulatedCloud(
         const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg
     ) {
@@ -942,8 +946,9 @@ PROPAGATION:
 
             snapshot.scan_start_state = laser_scan_start_state_;
             snapshot.submap_query_state = last_registered_state_;
-            snapshot.init_gicp = prev_T_gicp_;
-            //snapshot.init_gicp = Eigen::Matrix4d::Identity();
+            snapshot.init_gicp = gicp_use_previous_transform_guess_
+                ? prev_T_gicp_
+                : Eigen::Matrix4d::Identity();
             snapshot.imu_buffer = imu_data_;
             snapshot.has_keyframes = !keyframes_.empty();
             snapshot.keyframes.clear();
@@ -1171,12 +1176,15 @@ PROPAGATION:
                 prev_scan_stamp_ = frame_ref_time;
                 if (reset_gicp_guess)
                     prev_T_gicp_ = Eigen::Matrix4d::Identity();
+                else if (!gicp_use_previous_transform_guess_)
+                    prev_T_gicp_ = Eigen::Matrix4d::Identity();
                 if (update_registration) {
 
                     last_registered_state_ = frame_state;
                     last_registered_stamp_ = frame_ref_time;
                     consecutive_gicp_rejects_ = 0;
-                    if (accepted_T_gicp) prev_T_gicp_ = *accepted_T_gicp;
+                    if (gicp_use_previous_transform_guess_ && accepted_T_gicp)
+                        prev_T_gicp_ = *accepted_T_gicp;
                     if (keyframe_pose && cloud_aligned) {
 
                         keyframe_added =
@@ -1336,12 +1344,20 @@ PROPAGATION:
             auto cloud_aligned =
                 std::make_shared<pcl::PointCloud<pcl::PointXYZ>>(*cloud_filtered);
             const Pose first_pose = imu_state.pose;
+
+            // 改为 cloud_kf - body 参考系的去畸变点云
+            Eigen::Matrix4d T_first = Eigen::Matrix4d::Identity();
+            T_first.block<3, 3>(0, 0) = first_pose.q.toRotationMatrix();
+            T_first.block<3, 1>(0, 3) = first_pose.p;
+            auto cloud_kf = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+            pcl::transformPointCloud(*cloud_aligned, *cloud_kf, T_first.inverse().cast<float>());
+
             commit_frame(
                 imu_state,
                 true,
                 &first_pose,
                 cloud_aligned,
-                cloud_local_filtered,
+                cloud_kf,// 原 cloud_local_filtered
                 0.0,
                 nullptr);
             RCLCPP_INFO(get_logger(), "First keyframe published");
@@ -1391,6 +1407,8 @@ PROPAGATION:
             return;
         }
 
+        // T_corr 是先验世界点云到已注册世界点云的修正变换
+        // T_prior 是待修正的位姿，取中间时刻误差最小
         Eigen::Matrix4d T_prior = Eigen::Matrix4d::Identity();
         T_prior.block<3, 3>(0, 0) = imu_state.pose.q.toRotationMatrix();
         T_prior.block<3, 1>(0, 3) = imu_state.pose.p;
@@ -1509,7 +1527,7 @@ PROPAGATION:
         const auto imu_to_fused = pose_delta(imu_state.pose, fused_state.pose);
         const auto gicp_to_fused = pose_delta(gicp_pose, fused_state.pose);
         RCLCPP_INFO_THROTTLE(
-            get_logger(), *get_clock(), 2000,
+            get_logger(), *get_clock(), 500,
             "gicp accepted: score=%.4f source=%zu target=%zu "
             "corr_t=%.3f corr_r=%.2f fuser_dt=%.6f weight=%.3f "
             "imu_to_gicp_dp=%.3f dr=%.2f imu_to_fused_dp=%.3f dr=%.2f gicp_to_fused_dp=%.3f dr=%.2f "
@@ -1526,13 +1544,16 @@ PROPAGATION:
         auto cloud_aligned = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
         pcl::transformPointCloud(*cloud_filtered, *cloud_aligned, T_corr.cast<float>());
 
+        auto cloud_kf = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        pcl::transformPointCloud(*cloud_aligned, *cloud_kf, T_global.inverse().cast<float>());
+
         // publish normal end
         commit_frame(
             fused_state,
             true,
             &gicp_pose,
             cloud_aligned,
-            cloud_local_filtered,
+            cloud_kf, // 原 cloud_local_filtered
             score,
             &T_corr);
 

@@ -400,11 +400,106 @@ namespace small_dlio {
         if (!T_world_current.allFinite() || !T_world_history.allFinite())
             return false;
 
+        auto yaw_from_matrix = [](const Eigen::Matrix4d &T) {
+
+            return std::atan2(T(1, 0), T(0, 0));
+        };
+
+        auto normalize_deg = [](double deg) {
+
+            while (deg > 180.0) deg -= 360.0;
+            while (deg <= -180.0) deg += 360.0;
+            return deg;
+        };
+
+        auto make_yaw_init = [](
+            const Eigen::Matrix4d &base,
+            const double yaw_rad
+        ) {
+
+            Eigen::Matrix4d init = base;
+            const Eigen::AngleAxisd yaw_rot(yaw_rad, Eigen::Vector3d::UnitZ());
+            init.block<3, 3>(0, 0) = yaw_rot.toRotationMatrix();
+            return init;
+        };
+
+        auto correction_delta = [](
+            const Eigen::Matrix4d &init,
+            const Eigen::Matrix4d &final
+        ) {
+
+            const Eigen::Matrix4d correction = init.inverse() * final;
+            const double corr_t = correction.block<3, 1>(0, 3).norm();
+            Eigen::Matrix3d corr_R = correction.block<3, 3>(0, 0);
+            Eigen::Quaterniond corr_q(corr_R);
+            corr_q.normalize();
+            double corr_r_deg =
+                Eigen::AngleAxisd(corr_q).angle() * 180.0 / M_PI;
+            if (corr_r_deg > 180.0)
+                corr_r_deg = 360.0 - corr_r_deg;
+            return std::make_pair(corr_t, corr_r_deg);
+        };
+
         const Eigen::Matrix4d init_guess =
             T_world_history.inverse() * T_world_current;
+        const double odom_yaw = yaw_from_matrix(init_guess);
+        const double iris_yaw =
+            static_cast<double>(candidate.yaw_bias) * M_PI / 180.0;
+        const Eigen::Matrix4d init_iris_pos =
+            make_yaw_init(init_guess, iris_yaw);
+        const Eigen::Matrix4d init_iris_neg =
+            make_yaw_init(init_guess, -iris_yaw);
 
         const GicpResult result =
             gicp_matcher_.align(current.cloud, history->cloud, init_guess);
+        const GicpResult iris_pos_result =
+            gicp_matcher_.align(current.cloud, history->cloud, init_iris_pos);
+        const GicpResult iris_neg_result =
+            gicp_matcher_.align(current.cloud, history->cloud, init_iris_neg);
+
+        const auto odom_corr = result.success
+            ? correction_delta(init_guess, result.transform)
+            : std::make_pair(
+                std::numeric_limits<double>::infinity(),
+                std::numeric_limits<double>::infinity());
+        const auto iris_pos_corr = iris_pos_result.success
+            ? correction_delta(init_iris_pos, iris_pos_result.transform)
+            : std::make_pair(
+                std::numeric_limits<double>::infinity(),
+                std::numeric_limits<double>::infinity());
+        const auto iris_neg_corr = iris_neg_result.success
+            ? correction_delta(init_iris_neg, iris_neg_result.transform)
+            : std::make_pair(
+                std::numeric_limits<double>::infinity(),
+                std::numeric_limits<double>::infinity());
+
+        RCLCPP_INFO(
+            get_logger(),
+            "Loop init debug: current=%u history=%u iris=%.4f yaw_bias=%d "
+            "odom_yaw=%.2f iris_yaw+=%.2f iris_yaw-=%.2f "
+            "score=[odom %.4f iris+ %.4f iris- %.4f] "
+            "corr_t=[%.3f %.3f %.3f] corr_r=[%.2f %.2f %.2f] "
+            "success=[%d %d %d]",
+            candidate.current_id,
+            candidate.history_id,
+            candidate.iris_distance,
+            candidate.yaw_bias,
+            normalize_deg(odom_yaw * 180.0 / M_PI),
+            normalize_deg(iris_yaw * 180.0 / M_PI),
+            normalize_deg(-iris_yaw * 180.0 / M_PI),
+            result.score,
+            iris_pos_result.score,
+            iris_neg_result.score,
+            odom_corr.first,
+            iris_pos_corr.first,
+            iris_neg_corr.first,
+            odom_corr.second,
+            iris_pos_corr.second,
+            iris_neg_corr.second,
+            result.success ? 1 : 0,
+            iris_pos_result.success ? 1 : 0,
+            iris_neg_result.success ? 1 : 0
+        );
 
         if (!result.success) {
 
@@ -419,14 +514,8 @@ namespace small_dlio {
             return false;
         }
 
-        const Eigen::Matrix4d correction = init_guess.inverse() * result.transform;
-        const double corr_t = correction.block<3, 1>(0, 3).norm();
-        Eigen::Matrix3d corr_R = correction.block<3, 3>(0, 0);
-        Eigen::Quaterniond corr_q(corr_R);
-        corr_q.normalize();
-        double corr_r_deg = Eigen::AngleAxisd(corr_q).angle() * 180.0 / M_PI;
-        if (corr_r_deg > 180.0)
-            corr_r_deg = 360.0 - corr_r_deg;
+        const double corr_t = odom_corr.first;
+        const double corr_r_deg = odom_corr.second;
 
         candidate.gicp_score = result.score;
         candidate.gicp_correction_trans = corr_t;
