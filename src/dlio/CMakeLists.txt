@@ -111,6 +111,15 @@ add_executable(loop_detector_node
   src/loop_detector_node.cpp
 )
 
+add_executable(map_node
+  src/map_node_main.cpp
+  src/map_node.cpp
+)
+
+add_executable(fastlio_keyframe_bridge
+  src/fastlio_keyframe_bridge.cpp
+)
+
 rosidl_get_typesupport_target(cpp_typesupport_target
   ${PROJECT_NAME} rosidl_typesupport_cpp
 )
@@ -155,6 +164,35 @@ ament_target_dependencies(loop_detector_node
   pcl_conversions
 )
 
+target_include_directories(map_node
+  PRIVATE
+    include
+    include/small_dlio
+    ${PCL_INCLUDE_DIRS}
+)
+
+ament_target_dependencies(map_node
+  rclcpp
+  sensor_msgs
+  std_msgs
+  std_srvs
+  geometry_msgs
+  pcl_conversions
+)
+
+target_include_directories(fastlio_keyframe_bridge
+  PRIVATE
+    include
+    include/small_dlio
+)
+
+ament_target_dependencies(fastlio_keyframe_bridge
+  rclcpp
+  sensor_msgs
+  geometry_msgs
+  nav_msgs
+)
+
 target_link_libraries(dlio_node
   Eigen3::Eigen
   ${PCL_LIBRARIES}
@@ -173,7 +211,18 @@ target_link_libraries(loop_detector_node
   "${cpp_typesupport_target}"
 )
 
-install(TARGETS dlio_node loop_detector_node
+target_link_libraries(map_node
+  Eigen3::Eigen
+  ${PCL_LIBRARIES}
+  "${cpp_typesupport_target}"
+)
+
+target_link_libraries(fastlio_keyframe_bridge
+  Eigen3::Eigen
+  "${cpp_typesupport_target}"
+)
+
+install(TARGETS dlio_node loop_detector_node map_node fastlio_keyframe_bridge
   DESTINATION lib/${PROJECT_NAME}
 )
 

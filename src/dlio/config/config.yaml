@@ -22,16 +22,30 @@ small_dlio_odom:
         #              0.0, 0.0, 0.0, 1.0]
 
         # body -> LiDAR
-        t_body_lidar: [0.0, 0.0, 0.0]
+        t_body_lidar: [-0.011, -0.02329, 0.04412]
         q_body_lidar: [1.0, 0.0, 0.0, 0.0]
-        # Optional row-major 4x4 matrix. If provided, it overrides t_body_lidar/q_body_lidar.
-        # T_body_lidar: [1.0, 0.0, 0.0, 0.0,
-        #                0.0, 1.0, 0.0, 0.0,
-        #                0.0, 0.0, 1.0, 0.0,
-        #                0.0, 0.0, 0.0, 1.0]
+        T_body_lidar:
+            [
+                1.0,
+                0.0,
+                0.0,
+                -0.011,
+                0.0,
+                1.0,
+                0.0,
+                -0.02329,
+                0.0,
+                0.0,
+                1.0,
+                0.04412,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+            ]
 
         # ========== Gravity ==========
-        gravity: [0.0, 0.0, 9.8]
+        gravity: [0.0, 0.0, 9.80665]
 
         # ========== IMU Calibration ==========
         imu_calibrate: true # 启动时标定 IMU 零偏
@@ -49,23 +63,23 @@ small_dlio_odom:
         log_throttle_ms: 10
 
         # ========== GICP ==========
-        gicp_leaf_size: 0.1 # voxel filter leaf size (m)
+        gicp_leaf_size: 0.05 # voxel filter leaf size (m)
         gicp_num_threads: 4
         gicp_correspondence_randomness: 20
         gicp_max_correspondence_distance: 1.0
         gicp_reject_reset_threshold: 3
         gicp_max_correction_trans: 5.0 # meters, norm of T_corr translation
-        gicp_max_correction_rot_deg: 30.0 # degrees, rotation of T_corr
+        gicp_max_correction_rot_deg: 20.0 # degrees, rotation of T_corr
         gicp_max_imu_to_gicp_trans: 5.0 # meters, imu prior to gicp pose
-        gicp_max_imu_to_gicp_rot_deg: 30.0 # degrees, imu prior to gicp pose
+        gicp_max_imu_to_gicp_rot_deg: 20.0 # degrees, imu prior to gicp pose
         gicp_use_previous_transform_guess: false # use previous accepted T_corr as next GICP initial guess
 
         # ========== Geometric Observer Gains ==========
         geo_Kp: 4.5
         geo_Kv: 11.25
-        geo_Kq: 4.0
+        geo_Kq: 10.0
         geo_Ka: 2.25
-        geo_Kg: 1.0
+        geo_Kg: 2.5
         geo_b_max: 5.0
         geo_max_delta_v: 0.75 # m/s, max single-frame velocity correction
         geo_max_delta_ba: 0.1 # m/s^2, max single-frame accel bias correction
@@ -75,6 +89,7 @@ small_dlio_odom:
         # ========== Map ==========
         map_leaf_size: 0.20
         map_topic: "/global_map"
+        map_frame: "odom"
         keyframe_topic: "/keyframe_msg"
 
 map_node:
@@ -85,12 +100,26 @@ map_node:
         optimized_keyframes_topic: "/optimized_keyframes"
         body_frame: "body"
         lidar_frame: "livox_frame"
-        t_body_lidar: [0.0, 0.0, 0.0]
+        t_body_lidar: [-0.011, -0.02329, 0.04412]
         q_body_lidar: [1.0, 0.0, 0.0, 0.0]
-        # Optional row-major 4x4 matrix. If provided, it overrides t_body_lidar/q_body_lidar.
-        # T_body_lidar: [1.0, 0.0, 0.0, 0.0,
-        #                0.0, 1.0, 0.0, 0.0,
-        #                0.0, 0.0, 1.0, 0.0,
-        #                0.0, 0.0, 0.0, 1.0]
+        T_body_lidar:
+            [
+                1.0,
+                0.0,
+                0.0,
+                -0.011,
+                0.0,
+                1.0,
+                0.0,
+                -0.02329,
+                0.0,
+                0.0,
+                1.0,
+                0.04412,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+            ]
         save_map_service_name: "/save_map"
         map_save_path: "/home/goose/small_dlio/global_map.pcd"

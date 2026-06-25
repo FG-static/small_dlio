@@ -3,6 +3,7 @@
 
 #include "dlio/msg/key_frame.hpp"
 #include "gicp.hpp"
+#include "geometry_msgs/msg/vector3_stamped.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "point_types.hpp"
 #include "rclcpp/time.hpp"
@@ -74,6 +75,8 @@ namespace small_dlio {
             pub_keyframe_cloud_;
         rclcpp::Publisher<dlio::msg::KeyFrame>::SharedPtr
             pub_keyframe_msg_;
+        rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr
+            pub_yaw_delta_debug_;
         rclcpp::TimerBase::SharedPtr publish_timer_;
         std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
         std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;

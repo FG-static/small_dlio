@@ -80,6 +80,7 @@ namespace small_dlio {
 
         double map_leaf_size_ = 0.1;
         std::string map_topic_ = "/global_map";
+        std::string map_frame_ = "odom";
         std::string keyframe_topic_ = "/keyframe_msg";
         std::string optimized_keyframes_topic_ = "/optimized_keyframes";
         std::string save_map_service_name_ = "/save_map";

@@ -130,6 +130,10 @@ namespace small_dlio {
             create_publisher<dlio::msg::KeyFrame>(
                 "keyframe_msg", 10
             );
+        pub_yaw_delta_debug_ =
+            create_publisher<geometry_msgs::msg::Vector3Stamped>(
+                "yaw_delta_debug", 10
+            );
         publish_timer_ = create_wall_timer(
             std::chrono::milliseconds(10),
             [this]() {
@@ -1021,6 +1025,13 @@ PROPAGATION:
                 (to.p - from.p).norm(),
                 Eigen::AngleAxisd(dq).angle() * 180.0 / M_PI);
         };
+        auto yaw_delta_deg = [](const Pose &from, const Pose &to) {
+            Eigen::Quaterniond dq = (from.q.conjugate() * to.q).normalized();
+            if (!dq.coeffs().allFinite() || dq.norm() < 1e-9)
+                return 0.0;
+            Eigen::Matrix3d R = dq.toRotationMatrix();
+            return std::atan2(R(1, 0), R(0, 0)) * 180.0 / M_PI;
+        };
 
         auto cloud = std::make_shared<pcl::PointCloud<PointXYZIT>>();
         cloud->reserve(msg->points.size());
@@ -1642,6 +1653,19 @@ PROPAGATION:
 
         const auto imu_to_fused = pose_delta(imu_state.pose, fused_state.pose);
         const auto gicp_to_fused = pose_delta(gicp_pose, fused_state.pose);
+        if (pub_yaw_delta_debug_) {
+
+            geometry_msgs::msg::Vector3Stamped yaw_msg;
+            yaw_msg.header.stamp = stamp;
+            yaw_msg.header.frame_id = odom_frame_;
+            yaw_msg.vector.x =
+                yaw_delta_deg(snapshot.scan_start_state.pose, imu_state.pose);
+            yaw_msg.vector.y =
+                yaw_delta_deg(snapshot.scan_start_state.pose, gicp_pose);
+            yaw_msg.vector.z =
+                yaw_delta_deg(snapshot.scan_start_state.pose, fused_state.pose);
+            pub_yaw_delta_debug_->publish(yaw_msg);
+        }
         RCLCPP_INFO_THROTTLE(
             get_logger(), *get_clock(), 500,
             "gicp accepted: score=%.4f source=%zu target=%zu "

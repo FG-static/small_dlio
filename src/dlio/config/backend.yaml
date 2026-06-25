@@ -7,13 +7,12 @@ small_dlio_loop_detector:
         marker_frame: "odom"
         body_frame: "body"
         lidar_frame: "livox_frame"
-        t_body_lidar: [0.0, 0.0, 0.0]
+        t_body_lidar: [-0.011, -0.02329, 0.04412]
         q_body_lidar: [1.0, 0.0, 0.0, 0.0]
-        # Optional row-major 4x4 matrix. If provided, it overrides t_body_lidar/q_body_lidar.
-        # T_body_lidar: [1.0, 0.0, 0.0, 0.0,
-        #                0.0, 1.0, 0.0, 0.0,
-        #                0.0, 0.0, 1.0, 0.0,
-        #                0.0, 0.0, 0.0, 1.0]
+        T_body_lidar: [1.0, 0.0, 0.0, -0.011,
+                       0.0, 1.0, 0.0, -0.02329,
+                       0.0, 0.0, 1.0, 0.04412,
+                       0.0, 0.0, 0.0, 1.0]
         loop_enable: true
         loop_min_keyframe_gap: 0
         loop_min_travel_distance: 8.0
@@ -35,3 +34,15 @@ small_dlio_loop_detector:
         iris_mult: 1.6
         iris_sigma_onf: 0.75
         iris_match_num: 2
+
+fastlio_keyframe_bridge:
+    ros__parameters:
+        odom_topic: "/Odometry"
+        cloud_topic: "/cloud_registered_body"
+        keyframe_topic: "/keyframe_msg"
+        map_frame: "camera_init"
+        body_frame: "body"
+        kf_trans_thresh: 0.5
+        kf_rot_thresh: 0.1745
+        max_cloud_delay_sec: 0.05
+        min_cloud_points: 10

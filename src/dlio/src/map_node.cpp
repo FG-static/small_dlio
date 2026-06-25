@@ -65,6 +65,7 @@ namespace small_dlio {
 
         this->declare_parameter("map_leaf_size", 0.1);
         this->declare_parameter("map_topic", "/global_map");
+        this->declare_parameter("map_frame", map_frame_);
         this->declare_parameter("keyframe_topic", "/keyframe_msg");
         this->declare_parameter("save_map_service_name", "/save_map");
         this->declare_parameter("map_save_path", "/home/goose/small_dlio/global_map.pcd");
@@ -74,6 +75,7 @@ namespace small_dlio {
 
         this->get_parameter("map_leaf_size", map_leaf_size_);
         this->get_parameter("map_topic", map_topic_);
+        this->get_parameter("map_frame", map_frame_);
         this->get_parameter("keyframe_topic", keyframe_topic_);
         this->get_parameter("save_map_service_name", save_map_service_name_);
         this->get_parameter("map_save_path", map_save_path_);
@@ -386,7 +388,7 @@ namespace small_dlio {
         sensor_msgs::msg::PointCloud2 map_msg;
         pcl::toROSMsg(*global_map_, map_msg);
         map_msg.header.stamp = stamp;
-        map_msg.header.frame_id = "odom";
+        map_msg.header.frame_id = map_frame_;
         pub_map_->publish(map_msg);
     }
 } // small_dlio
