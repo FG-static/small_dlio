@@ -87,6 +87,7 @@ namespace small_dlio {
         std::string map_save_path_ = "/home/goose/small_dlio/global_map.pcd";
         std::string body_frame_ = "body";
         std::string lidar_frame_ = "livox_frame";
+        bool rebuild_unoptimized_keyframes_with_approximation_ = true;
     };
 } // small_dlio
 

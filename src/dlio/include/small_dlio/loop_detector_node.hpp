@@ -21,6 +21,7 @@
 #include <memory>
 #include <rclcpp/publisher.hpp>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace small_dlio {
@@ -71,6 +72,19 @@ namespace small_dlio {
             LoopKeyFrame &keyframe
         ) const;
 
+        bool shouldAcceptKeyFrameCandidate(
+            const dlio::msg::KeyFrame &msg
+        ) const;
+
+        std::pair<double, double> poseDelta(
+            const geometry_msgs::msg::Pose &from,
+            const geometry_msgs::msg::Pose &to
+        ) const;
+
+        static size_t pointCount(
+            const sensor_msgs::msg::PointCloud2 &cloud
+        );
+
         bool computeIrisDescriptor(
             LoopKeyFrame &keyframe
         );
@@ -118,7 +132,9 @@ namespace small_dlio {
         ) const;
 
         Eigen::Matrix<double, 6, 6> makeInformationMatrix(
-            double weight
+            const std::vector<double> &diag,
+            double fallback_weight,
+            const char *param_name
         ) const;
 
         std::pair<double, double> relativeDelta(
@@ -151,6 +167,8 @@ namespace small_dlio {
             pub_loop_markers_;
         rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr
             pub_optimized_path_;
+        rclcpp::Publisher<dlio::msg::KeyFrame>::SharedPtr
+            pub_filtered_keyframe_;
 
         std::unique_ptr<LidarIris> lidar_iris_;
         GicpMatcher gicp_matcher_;
@@ -162,9 +180,15 @@ namespace small_dlio {
 
         std::string optimized_keyframes_topic_ = "optimized_keyframes";
         std::string keyframe_topic_ = "keyframe_msg";
+        std::string filtered_keyframe_topic_;
         std::string marker_topic_ = "loop_candidates_marker";
         std::string optimized_path_topic_ = "optimized_path";
         std::string marker_frame_ = "odom";
+
+        double kf_trans_thresh_ = 0.5;
+        double kf_rot_thresh_ = 0.1745;
+        double min_kf_interval_sec_ = 0.0;
+        int min_cloud_points_ = 10;
 
         bool loop_enable_ = true;
         int loop_min_keyframe_gap_ = 0;
@@ -187,6 +211,8 @@ namespace small_dlio {
         int pgo_max_iterations_ = 20;
         double pgo_odom_edge_weight_ = 100.0;
         double pgo_loop_edge_weight_ = 500.0;
+        std::vector<double> pgo_odom_info_diag_;
+        std::vector<double> pgo_loop_info_diag_;
 
         int iris_nscale_ = 4;
         int iris_min_wave_length_ = 18;
@@ -200,6 +226,10 @@ namespace small_dlio {
         uint64_t candidate_hits_ = 0;
         uint64_t candidate_misses_ = 0;
         double accumulated_travel_distance_ = 0.0;
+        geometry_msgs::msg::Pose last_accepted_keyframe_pose_;
+        rclcpp::Time last_accepted_keyframe_stamp_;
+        bool has_last_accepted_keyframe_ = false;
+        uint32_t next_backend_keyframe_id_ = 0;
     };
 
 } // namespace small_dlio

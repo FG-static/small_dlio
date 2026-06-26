@@ -58,6 +58,9 @@ namespace small_dlio {
             create_publisher<nav_msgs::msg::Path>(
                 optimized_path_topic_,
                 rclcpp::QoS(1).transient_local().reliable()
+                // 队列深度 1
+                // 记录最后一条发布的消息，新订阅者连上后立即收到
+                // tcp 式多次重传，确保数据送到
             );
 
         pub_optimized_keyframes_ =
@@ -65,25 +68,45 @@ namespace small_dlio {
                 optimized_keyframes_topic_,
                 rclcpp::QoS(1).reliable().transient_local()
             );
+        if (!filtered_keyframe_topic_.empty() &&
+            filtered_keyframe_topic_ != keyframe_topic_) {
+
+            pub_filtered_keyframe_ =
+                create_publisher<dlio::msg::KeyFrame>(
+                    filtered_keyframe_topic_,
+                    rclcpp::QoS(100)
+                );
+        }
 
         RCLCPP_INFO(
             get_logger(),
             "Loop detector backend: loop_gicp_enable=%d pgo_enable=%d "
-            "optimized_path_topic=%s min_keyframe_gap=%d min_travel=%.2f",
+            "optimized_path_topic=%s min_keyframe_gap=%d min_travel=%.2f "
+            "kf_trans=%.3f kf_rot=%.3f min_interval=%.3f filtered_topic=%s",
             loop_gicp_enable_ ? 1 : 0,
             pgo_enable_ ? 1 : 0,
             optimized_path_topic_.c_str(),
             loop_min_keyframe_gap_,
-            loop_min_travel_distance_
+            loop_min_travel_distance_,
+            kf_trans_thresh_,
+            kf_rot_thresh_,
+            min_kf_interval_sec_,
+            filtered_keyframe_topic_.empty() ? "<disabled>" :
+                filtered_keyframe_topic_.c_str()
         );
     }
 
     void LoopDetectorNode::loadParams() {
 
         declare_parameter("keyframe_topic", keyframe_topic_);
+        declare_parameter("filtered_keyframe_topic", filtered_keyframe_topic_);
         declare_parameter("marker_topic", marker_topic_);
         declare_parameter("optimized_path_topic", optimized_path_topic_);
         declare_parameter("marker_frame", marker_frame_);
+        declare_parameter("kf_trans_thresh", kf_trans_thresh_);
+        declare_parameter("kf_rot_thresh", kf_rot_thresh_);
+        declare_parameter("min_kf_interval_sec", min_kf_interval_sec_);
+        declare_parameter("min_cloud_points", min_cloud_points_);
         declare_parameter("loop_enable", loop_enable_);
         declare_parameter("loop_min_keyframe_gap", loop_min_keyframe_gap_);
         declare_parameter("loop_min_travel_distance", loop_min_travel_distance_);
@@ -106,6 +129,8 @@ namespace small_dlio {
         declare_parameter("pgo_max_iterations", pgo_max_iterations_);
         declare_parameter("pgo_odom_edge_weight", pgo_odom_edge_weight_);
         declare_parameter("pgo_loop_edge_weight", pgo_loop_edge_weight_);
+        declare_parameter("pgo_odom_info_diag", std::vector<double>{});
+        declare_parameter("pgo_loop_info_diag", std::vector<double>{});
         declare_parameter("iris_nscale", iris_nscale_);
         declare_parameter("iris_min_wave_length", iris_min_wave_length_);
         declare_parameter("iris_mult", iris_mult_);
@@ -114,9 +139,14 @@ namespace small_dlio {
         declare_parameter("optimized_keyframes_topic", optimized_keyframes_topic_);
 
         get_parameter("keyframe_topic", keyframe_topic_);
+        get_parameter("filtered_keyframe_topic", filtered_keyframe_topic_);
         get_parameter("marker_topic", marker_topic_);
         get_parameter("optimized_path_topic", optimized_path_topic_);
         get_parameter("marker_frame", marker_frame_);
+        get_parameter("kf_trans_thresh", kf_trans_thresh_);
+        get_parameter("kf_rot_thresh", kf_rot_thresh_);
+        get_parameter("min_kf_interval_sec", min_kf_interval_sec_);
+        get_parameter("min_cloud_points", min_cloud_points_);
         get_parameter("loop_enable", loop_enable_);
         get_parameter("loop_min_keyframe_gap", loop_min_keyframe_gap_);
         get_parameter("loop_min_travel_distance", loop_min_travel_distance_);
@@ -139,6 +169,8 @@ namespace small_dlio {
         get_parameter("pgo_max_iterations", pgo_max_iterations_);
         get_parameter("pgo_odom_edge_weight", pgo_odom_edge_weight_);
         get_parameter("pgo_loop_edge_weight", pgo_loop_edge_weight_);
+        get_parameter("pgo_odom_info_diag", pgo_odom_info_diag_);
+        get_parameter("pgo_loop_info_diag", pgo_loop_info_diag_);
         get_parameter("iris_nscale", iris_nscale_);
         get_parameter("iris_min_wave_length", iris_min_wave_length_);
         get_parameter("iris_mult", iris_mult_);
@@ -234,6 +266,26 @@ namespace small_dlio {
         };
 
         read_body_lidar_extrinsic();
+
+        const auto odom_info = makeInformationMatrix(
+            pgo_odom_info_diag_,
+            pgo_odom_edge_weight_,
+            "pgo_odom_info_diag"
+        );
+        const auto loop_info = makeInformationMatrix(
+            pgo_loop_info_diag_,
+            pgo_loop_edge_weight_,
+            "pgo_loop_info_diag"
+        );
+        RCLCPP_INFO(
+            get_logger(),
+            "PGO info diag order=[x y z roll pitch yaw], odom=[%.3f %.3f %.3f %.3f %.3f %.3f], "
+            "loop=[%.3f %.3f %.3f %.3f %.3f %.3f]",
+            odom_info(0, 0), odom_info(1, 1), odom_info(2, 2),
+            odom_info(3, 3), odom_info(4, 4), odom_info(5, 5),
+            loop_info(0, 0), loop_info(1, 1), loop_info(2, 2),
+            loop_info(3, 3), loop_info(4, 4), loop_info(5, 5)
+        );
     }
 
     void LoopDetectorNode::callbackKeyFrame(
@@ -245,13 +297,27 @@ namespace small_dlio {
         if (!msg) return;
         ++ received_keyframes_;
 
+        if (!shouldAcceptKeyFrameCandidate(*msg)) {
+
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "Skipped keyframe candidate: candidate_id=%u stored=%lu",
+                msg->id,
+                stored_keyframes_
+            );
+            return;
+        }
+
+        dlio::msg::KeyFrame accepted_msg = *msg;
+        accepted_msg.id = next_backend_keyframe_id_;
+
         LoopKeyFrame keyframe;
-        if (!convertKeyFrameMsg(*msg, keyframe)) {
+        if (!convertKeyFrameMsg(accepted_msg, keyframe)) {
 
             RCLCPP_WARN_THROTTLE(
                 get_logger(), *get_clock(), 2000,
                 "Rejected invalid keyframe message: id=%u",
-                msg->id
+                accepted_msg.id
             );
             return;
         }
@@ -267,6 +333,10 @@ namespace small_dlio {
             );
             return;
         }
+
+        ++ next_backend_keyframe_id_;
+        if (pub_filtered_keyframe_)
+            pub_filtered_keyframe_->publish(accepted_msg);
 
         keyframe.travel_distance = accumulated_travel_distance_;
         if (!keyframes_.empty()) {
@@ -388,6 +458,100 @@ namespace small_dlio {
                 e.what()
             );
         }
+    }
+
+    size_t LoopDetectorNode::pointCount(
+        const sensor_msgs::msg::PointCloud2 &cloud
+    ) {
+
+        return static_cast<size_t>(cloud.width) *
+            static_cast<size_t>(cloud.height);
+    }
+
+    std::pair<double, double> LoopDetectorNode::poseDelta(
+        const geometry_msgs::msg::Pose &from,
+        const geometry_msgs::msg::Pose &to
+    ) const {
+
+        const Eigen::Vector3d p_from(
+            from.position.x,
+            from.position.y,
+            from.position.z
+        );
+        const Eigen::Vector3d p_to(
+            to.position.x,
+            to.position.y,
+            to.position.z
+        );
+
+        Eigen::Quaterniond q_from(
+            from.orientation.w,
+            from.orientation.x,
+            from.orientation.y,
+            from.orientation.z
+        );
+        Eigen::Quaterniond q_to(
+            to.orientation.w,
+            to.orientation.x,
+            to.orientation.y,
+            to.orientation.z
+        );
+
+        if (q_from.norm() < 1e-9 || q_to.norm() < 1e-9)
+            return {
+                std::numeric_limits<double>::infinity(),
+                std::numeric_limits<double>::infinity()
+            };
+        q_from.normalize();
+        q_to.normalize();
+
+        Eigen::Quaterniond dq = (q_from.conjugate() * q_to).normalized();
+        if (dq.w() < 0.0)
+            dq.coeffs() *= -1.0;
+
+        return {
+            (p_to - p_from).norm(),
+            Eigen::AngleAxisd(dq).angle()
+        };
+    }
+
+    bool LoopDetectorNode::shouldAcceptKeyFrameCandidate(
+        const dlio::msg::KeyFrame &msg
+    ) const {
+
+        if (msg.cloud.data.empty() ||
+            pointCount(msg.cloud) < static_cast<size_t>(min_cloud_points_))
+            return false;
+
+        if (!std::isfinite(msg.pose.position.x) ||
+            !std::isfinite(msg.pose.position.y) ||
+            !std::isfinite(msg.pose.position.z) ||
+            !std::isfinite(msg.pose.orientation.w) ||
+            !std::isfinite(msg.pose.orientation.x) ||
+            !std::isfinite(msg.pose.orientation.y) ||
+            !std::isfinite(msg.pose.orientation.z))
+            return false;
+
+        if (!has_last_accepted_keyframe_)
+            return true;
+
+        if (std::isfinite(min_kf_interval_sec_) &&
+            min_kf_interval_sec_ > 0.0) {
+
+            const double dt =
+                (rclcpp::Time(msg.header.stamp) -
+                 last_accepted_keyframe_stamp_).seconds();
+            if (std::isfinite(dt) && dt >= 0.0 &&
+                dt < min_kf_interval_sec_)
+                return false;
+        }
+
+        const auto delta = poseDelta(last_accepted_keyframe_pose_, msg.pose);
+        if (!std::isfinite(delta.first) || !std::isfinite(delta.second))
+            return false;
+
+        return delta.first >= kf_trans_thresh_ ||
+            delta.second >= kf_rot_thresh_;
     }
 
     bool LoopDetectorNode::convertKeyFrameMsg(
@@ -542,14 +706,18 @@ namespace small_dlio {
             return deg;
         };
 
-        auto make_yaw_init = [](
+        auto make_yaw_delta_init = [](
             const Eigen::Matrix4d &base,
-            const double yaw_rad
+            const double yaw_delta_rad
         ) {
 
             Eigen::Matrix4d init = base;
-            const Eigen::AngleAxisd yaw_rot(yaw_rad, Eigen::Vector3d::UnitZ());
-            init.block<3, 3>(0, 0) = yaw_rot.toRotationMatrix();
+            const Eigen::AngleAxisd yaw_delta(
+                yaw_delta_rad,
+                Eigen::Vector3d::UnitZ()
+            );
+            init.block<3, 3>(0, 0) =
+                yaw_delta.toRotationMatrix() * base.block<3, 3>(0, 0);
             return init;
         };
 
@@ -588,9 +756,9 @@ namespace small_dlio {
         const double iris_yaw =
             static_cast<double>(candidate.yaw_bias) * M_PI / 180.0;
         const Eigen::Matrix4d init_iris_pos =
-            make_yaw_init(init_guess, iris_yaw);
+            make_yaw_delta_init(init_guess, iris_yaw);
         const Eigen::Matrix4d init_iris_neg =
-            make_yaw_init(init_guess, -iris_yaw);
+            make_yaw_delta_init(init_guess, -iris_yaw);
 
         const GicpResult result =
             gicp_matcher_.align(current.cloud, history->cloud, init_guess);
@@ -643,52 +811,100 @@ namespace small_dlio {
             iris_neg_result.success ? 1 : 0
         );
 
-        if (!result.success) {
+        struct GicpTrial {
+
+            const char *label = "";
+            GicpResult result;
+            double correction_trans = std::numeric_limits<double>::infinity();
+            double correction_rot_deg = std::numeric_limits<double>::infinity();
+            bool accepted = false;
+        };
+
+        auto evaluate_trial = [&](GicpTrial trial) {
+
+            trial.accepted =
+                trial.result.success &&
+                std::isfinite(trial.result.score) &&
+                trial.result.score < loop_gicp_score_thresh_ &&
+                std::isfinite(trial.correction_trans) &&
+                trial.correction_trans <= loop_gicp_max_correction_trans_ &&
+                std::isfinite(trial.correction_rot_deg) &&
+                trial.correction_rot_deg <= loop_gicp_max_correction_rot_deg_;
+            return trial;
+        };
+
+        const GicpTrial odom_trial = evaluate_trial(GicpTrial{
+            "odom",
+            result,
+            odom_corr.first,
+            odom_corr.second,
+            false
+        });
+        const GicpTrial iris_pos_trial = evaluate_trial(GicpTrial{
+            "iris+",
+            iris_pos_result,
+            iris_pos_corr.first,
+            iris_pos_corr.second,
+            false
+        });
+        const GicpTrial iris_neg_trial = evaluate_trial(GicpTrial{
+            "iris-",
+            iris_neg_result,
+            iris_neg_corr.first,
+            iris_neg_corr.second,
+            false
+        });
+
+        const GicpTrial *best_trial = nullptr;
+        for (const auto *trial :
+             {&odom_trial, &iris_pos_trial, &iris_neg_trial}) {
+
+            if (!trial->accepted)
+                continue;
+            if (!best_trial || trial->result.score < best_trial->result.score)
+                best_trial = trial;
+        }
+
+        if (!best_trial) {
 
             RCLCPP_WARN_THROTTLE(
                 get_logger(), *get_clock(), 2000,
-                "Loop GICP failed: current=%u history=%u iris=%.4f reason=%s",
+                "Loop GICP rejected: current=%u history=%u iris=%.4f "
+                "accepted=[odom %d iris+ %d iris- %d] score=[%.4f %.4f %.4f]",
                 candidate.current_id,
                 candidate.history_id,
                 candidate.iris_distance,
-                result.error_message.c_str()
+                odom_trial.accepted ? 1 : 0,
+                iris_pos_trial.accepted ? 1 : 0,
+                iris_neg_trial.accepted ? 1 : 0,
+                result.score,
+                iris_pos_result.score,
+                iris_neg_result.score
             );
             return false;
         }
 
-        const double corr_t = odom_corr.first;
-        const double corr_r_deg = odom_corr.second;
+        const double corr_t = best_trial->correction_trans;
+        const double corr_r_deg = best_trial->correction_rot_deg;
 
-        candidate.gicp_score = result.score;
+        candidate.gicp_score = best_trial->result.score;
         candidate.gicp_correction_trans = corr_t;
         candidate.gicp_correction_rot_deg = corr_r_deg;
-        candidate.source_to_target = result.transform;
+        candidate.source_to_target = best_trial->result.transform;
+        candidate.gicp_verified = true;
 
-        const bool accepted =
-            std::isfinite(result.score) &&
-            result.score < loop_gicp_score_thresh_ &&
-            std::isfinite(corr_t) &&
-            corr_t <= loop_gicp_max_correction_trans_ &&
-            std::isfinite(corr_r_deg) &&
-            corr_r_deg <= loop_gicp_max_correction_rot_deg_;
-
-        candidate.gicp_verified = accepted;
-
-        if (!accepted) {
-
-            RCLCPP_INFO(
-                get_logger(),
-                "Rejected loop by GICP: current=%u history=%u iris=%.4f "
-                "score=%.4f corr_t=%.3f corr_r=%.2f",
-                candidate.current_id,
-                candidate.history_id,
-                candidate.iris_distance,
-                result.score,
-                corr_t,
-                corr_r_deg
-            );
-            return false;
-        }
+        RCLCPP_INFO(
+            get_logger(),
+            "Accepted loop by GICP: current=%u history=%u init=%s iris=%.4f "
+            "score=%.4f corr_t=%.3f corr_r=%.2f",
+            candidate.current_id,
+            candidate.history_id,
+            best_trial->label,
+            candidate.iris_distance,
+            candidate.gicp_score,
+            corr_t,
+            corr_r_deg
+        );
 
         return true;
     }
@@ -807,12 +1023,56 @@ namespace small_dlio {
     }
 
     Eigen::Matrix<double, 6, 6> LoopDetectorNode::makeInformationMatrix(
-        const double weight
+        const std::vector<double> &diag,
+        const double fallback_weight,
+        const char *param_name
     ) const {
 
+        Eigen::Matrix<double, 6, 6> information =
+            Eigen::Matrix<double, 6, 6>::Zero();
+
+        if (diag.size() == 6) {
+
+            bool valid = true;
+            for (const double value : diag) {
+
+                if (!std::isfinite(value) || value <= 0.0) {
+
+                    valid = false;
+                    break;
+                }
+            }
+
+            if (valid) {
+
+                for (int i = 0; i < 6; ++i)
+                    information(i, i) = diag[static_cast<size_t>(i)];
+                return information;
+            }
+
+            RCLCPP_WARN(
+                get_logger(),
+                "%s must contain 6 positive finite values; falling back to scalar weight",
+                param_name ? param_name : "pgo_info_diag"
+            );
+        } else if (!diag.empty()) {
+
+            RCLCPP_WARN(
+                get_logger(),
+                "%s must contain 6 values [x,y,z,roll,pitch,yaw], got %zu; "
+                "falling back to scalar weight",
+                param_name ? param_name : "pgo_info_diag",
+                diag.size()
+            );
+        }
+
         const double safe_weight =
-            std::isfinite(weight) && weight > 0.0 ? weight : 1.0;
-        return safe_weight * Eigen::Matrix<double, 6, 6>::Identity();
+            std::isfinite(fallback_weight) && fallback_weight > 0.0
+                ? fallback_weight
+                : 1.0;
+        information.setIdentity();
+        information *= safe_weight;
+        return information;
     }
 
     std::pair<double, double> LoopDetectorNode::relativeDelta(
@@ -861,7 +1121,11 @@ namespace small_dlio {
             previous.id,
             keyframe.id,
             relative_pose,
-            makeInformationMatrix(pgo_odom_edge_weight_)
+            makeInformationMatrix(
+                pgo_odom_info_diag_,
+                pgo_odom_edge_weight_,
+                "pgo_odom_info_diag"
+            )
         );
     }
 
@@ -926,7 +1190,11 @@ namespace small_dlio {
             candidate.history_id,
             candidate.current_id,
             history_body_from_current_body,
-            makeInformationMatrix(pgo_loop_edge_weight_),
+            makeInformationMatrix(
+                pgo_loop_info_diag_,
+                pgo_loop_edge_weight_,
+                "pgo_loop_info_diag"
+            ),
             candidate.gicp_score
         );
     }
@@ -1010,6 +1278,9 @@ namespace small_dlio {
     ) {
 
         accumulated_travel_distance_ = keyframe.travel_distance;
+        last_accepted_keyframe_pose_ = keyframe.pose;
+        last_accepted_keyframe_stamp_ = keyframe.stamp;
+        has_last_accepted_keyframe_ = true;
         keyframes_.push_back(std::move(keyframe));
     }
 

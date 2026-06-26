@@ -72,6 +72,10 @@ namespace small_dlio {
         this->declare_parameter("optimized_keyframes_topic", "/optimized_keyframes");
         this->declare_parameter("body_frame", body_frame_);
         this->declare_parameter("lidar_frame", lidar_frame_);
+        this->declare_parameter(
+            "rebuild_unoptimized_keyframes_with_approximation",
+            rebuild_unoptimized_keyframes_with_approximation_
+        );
 
         this->get_parameter("map_leaf_size", map_leaf_size_);
         this->get_parameter("map_topic", map_topic_);
@@ -82,6 +86,10 @@ namespace small_dlio {
         this->get_parameter("optimized_keyframes_topic", optimized_keyframes_topic_);
         this->get_parameter("body_frame", body_frame_);
         this->get_parameter("lidar_frame", lidar_frame_);
+        this->get_parameter(
+            "rebuild_unoptimized_keyframes_with_approximation",
+            rebuild_unoptimized_keyframes_with_approximation_
+        );
 
         const std::vector<double> t_default = {0.0, 0.0, 0.0};
         const std::vector<double> q_default = {1.0, 0.0, 0.0, 0.0};
@@ -164,6 +172,11 @@ namespace small_dlio {
             "Map T_body_lidar: t=[%.6f %.6f %.6f] q=[%.6f %.6f %.6f %.6f]",
             translation.x(), translation.y(), translation.z(),
             rotation.w(), rotation.x(), rotation.y(), rotation.z()
+        );
+        RCLCPP_INFO(
+            get_logger(),
+            "Map rebuild_unoptimized_keyframes_with_approximation=%d",
+            rebuild_unoptimized_keyframes_with_approximation_ ? 1 : 0
         );
     }
 
@@ -353,6 +366,10 @@ namespace small_dlio {
 
                 T = poseToIsometry(optimized_it->second);
             } else {
+
+                if (!optimized_poses_.empty() &&
+                    !rebuild_unoptimized_keyframes_with_approximation_)
+                    continue;
 
                 T = poseToIsometry(keyframe.raw_pose);
                 if (has_pgo_correction_)

@@ -91,6 +91,7 @@ small_dlio_odom:
         map_topic: "/global_map"
         map_frame: "odom"
         keyframe_topic: "/keyframe_msg"
+        rebuild_unoptimized_keyframes_with_approximation: true
 
 map_node:
     ros__parameters:
@@ -98,6 +99,7 @@ map_node:
         map_topic: "/global_map"
         keyframe_topic: "/keyframe_msg"
         optimized_keyframes_topic: "/optimized_keyframes"
+        rebuild_unoptimized_keyframes_with_approximation: true
         body_frame: "body"
         lidar_frame: "livox_frame"
         t_body_lidar: [-0.011, -0.02329, 0.04412]
