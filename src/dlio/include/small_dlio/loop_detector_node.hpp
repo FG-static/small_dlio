@@ -6,6 +6,7 @@
 #include "gicp.hpp"
 #include "geometry_msgs/msg/pose.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
+#include "geometry_msgs/msg/vector3_stamped.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "pose_graph.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -106,6 +107,16 @@ namespace small_dlio {
             LoopCandidate &candidate
         );
 
+        pcl::PointCloud<pcl::PointXYZ>::Ptr buildLoopGicpSubmap(
+            const LoopKeyFrame &anchor
+        ) const;
+
+        bool appendKeyFrameToSubmap(
+            const LoopKeyFrame &anchor,
+            const LoopKeyFrame &frame,
+            pcl::PointCloud<pcl::PointXYZ> &submap
+        ) const;
+
         bool isCandidateAllowed(
             const LoopKeyFrame &current,
             const LoopKeyFrame &history
@@ -150,7 +161,7 @@ namespace small_dlio {
             const LoopCandidate &candidate
         );
 
-        void optimizePoseGraphIfNeeded(
+        double optimizePoseGraphIfNeeded(
             bool has_new_loop
         );
 
@@ -162,6 +173,12 @@ namespace small_dlio {
 
         void publishOptimizedPath() const;
 
+        void publishTiming(
+            double lcd_ms,
+            double pgo_ms,
+            const rclcpp::Time &stamp
+        ) const;
+
         rclcpp::Subscription<dlio::msg::KeyFrame>::SharedPtr sub_keyframe_;
         rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
             pub_loop_markers_;
@@ -169,6 +186,8 @@ namespace small_dlio {
             pub_optimized_path_;
         rclcpp::Publisher<dlio::msg::KeyFrame>::SharedPtr
             pub_filtered_keyframe_;
+        rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr
+            pub_timing_;
 
         std::unique_ptr<LidarIris> lidar_iris_;
         GicpMatcher gicp_matcher_;
@@ -183,6 +202,7 @@ namespace small_dlio {
         std::string filtered_keyframe_topic_;
         std::string marker_topic_ = "loop_candidates_marker";
         std::string optimized_path_topic_ = "optimized_path";
+        std::string timing_topic_ = "/lcd_pgo_timing";
         std::string marker_frame_ = "odom";
 
         double kf_trans_thresh_ = 0.5;
@@ -198,6 +218,9 @@ namespace small_dlio {
         double loop_gicp_score_thresh_ = 1.0;
         double loop_gicp_max_correction_trans_ = 3.0;
         double loop_gicp_max_correction_rot_deg_ = 20.0;
+        bool loop_gicp_use_submap_ = false;
+        int loop_gicp_submap_keyframes_ = 5;
+        double loop_gicp_submap_leaf_size_ = 0.2;
         int loop_gicp_num_threads_ = 4;
         int loop_gicp_correspondence_randomness_ = 20;
         double loop_gicp_max_correspondence_distance_ = 1.0;

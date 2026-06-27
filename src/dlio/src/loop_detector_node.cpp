@@ -6,14 +6,30 @@
 
 #include <Eigen/Geometry>
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <pcl/common/transforms.h>
+#include <pcl/filters/voxel_grid.h>
 #include <rclcpp/qos_overriding_options.hpp>
 #include <utility>
 
 namespace small_dlio {
+
+    namespace {
+
+        using SteadyClock = std::chrono::steady_clock;
+
+        double elapsedMs(
+            const SteadyClock::time_point &start,
+            const SteadyClock::time_point &end
+        ) {
+
+            return std::chrono::duration<double, std::milli>(end - start).count();
+        }
+    }
 
     LoopDetectorNode::LoopDetectorNode() : Node("small_dlio_loop_detector") {
 
@@ -68,6 +84,11 @@ namespace small_dlio {
                 optimized_keyframes_topic_,
                 rclcpp::QoS(1).reliable().transient_local()
             );
+        pub_timing_ =
+            create_publisher<geometry_msgs::msg::Vector3Stamped>(
+                timing_topic_,
+                10
+            );
         if (!filtered_keyframe_topic_.empty() &&
             filtered_keyframe_topic_ != keyframe_topic_) {
 
@@ -102,6 +123,7 @@ namespace small_dlio {
         declare_parameter("filtered_keyframe_topic", filtered_keyframe_topic_);
         declare_parameter("marker_topic", marker_topic_);
         declare_parameter("optimized_path_topic", optimized_path_topic_);
+        declare_parameter("timing_topic", timing_topic_);
         declare_parameter("marker_frame", marker_frame_);
         declare_parameter("kf_trans_thresh", kf_trans_thresh_);
         declare_parameter("kf_rot_thresh", kf_rot_thresh_);
@@ -115,6 +137,9 @@ namespace small_dlio {
         declare_parameter("loop_gicp_score_thresh", loop_gicp_score_thresh_);
         declare_parameter("loop_gicp_max_correction_trans", loop_gicp_max_correction_trans_);
         declare_parameter("loop_gicp_max_correction_rot_deg", loop_gicp_max_correction_rot_deg_);
+        declare_parameter("loop_gicp_use_submap", loop_gicp_use_submap_);
+        declare_parameter("loop_gicp_submap_keyframes", loop_gicp_submap_keyframes_);
+        declare_parameter("loop_gicp_submap_leaf_size", loop_gicp_submap_leaf_size_);
         declare_parameter("loop_gicp_num_threads", loop_gicp_num_threads_);
         declare_parameter(
             "loop_gicp_correspondence_randomness",
@@ -142,6 +167,7 @@ namespace small_dlio {
         get_parameter("filtered_keyframe_topic", filtered_keyframe_topic_);
         get_parameter("marker_topic", marker_topic_);
         get_parameter("optimized_path_topic", optimized_path_topic_);
+        get_parameter("timing_topic", timing_topic_);
         get_parameter("marker_frame", marker_frame_);
         get_parameter("kf_trans_thresh", kf_trans_thresh_);
         get_parameter("kf_rot_thresh", kf_rot_thresh_);
@@ -155,6 +181,9 @@ namespace small_dlio {
         get_parameter("loop_gicp_score_thresh", loop_gicp_score_thresh_);
         get_parameter("loop_gicp_max_correction_trans", loop_gicp_max_correction_trans_);
         get_parameter("loop_gicp_max_correction_rot_deg", loop_gicp_max_correction_rot_deg_);
+        get_parameter("loop_gicp_use_submap", loop_gicp_use_submap_);
+        get_parameter("loop_gicp_submap_keyframes", loop_gicp_submap_keyframes_);
+        get_parameter("loop_gicp_submap_leaf_size", loop_gicp_submap_leaf_size_);
         get_parameter("loop_gicp_num_threads", loop_gicp_num_threads_);
         get_parameter(
             "loop_gicp_correspondence_randomness",
@@ -177,6 +206,12 @@ namespace small_dlio {
         get_parameter("iris_sigma_onf", iris_sigma_onf_);
         get_parameter("iris_match_num", iris_match_num_);
         get_parameter("optimized_keyframes_topic", optimized_keyframes_topic_);
+
+        if (loop_gicp_submap_keyframes_ < 1)
+            loop_gicp_submap_keyframes_ = 1;
+        if (!std::isfinite(loop_gicp_submap_leaf_size_) ||
+            loop_gicp_submap_leaf_size_ < 0.0)
+            loop_gicp_submap_leaf_size_ = 0.0;
 
         auto read_body_lidar_extrinsic = [this]() {
             const std::vector<double> t_default = {0.0, 0.0, 0.0};
@@ -286,6 +321,13 @@ namespace small_dlio {
             loop_info(0, 0), loop_info(1, 1), loop_info(2, 2),
             loop_info(3, 3), loop_info(4, 4), loop_info(5, 5)
         );
+        RCLCPP_INFO(
+            get_logger(),
+            "Loop GICP submap: enabled=%d keyframes=%d leaf=%.3f",
+            loop_gicp_use_submap_ ? 1 : 0,
+            loop_gicp_submap_keyframes_,
+            loop_gicp_submap_leaf_size_
+        );
     }
 
     void LoopDetectorNode::callbackKeyFrame(
@@ -310,6 +352,7 @@ namespace small_dlio {
 
         dlio::msg::KeyFrame accepted_msg = *msg;
         accepted_msg.id = next_backend_keyframe_id_;
+        const rclcpp::Time timing_stamp(accepted_msg.header.stamp);
 
         LoopKeyFrame keyframe;
         if (!convertKeyFrameMsg(accepted_msg, keyframe)) {
@@ -322,6 +365,7 @@ namespace small_dlio {
             return;
         }
 
+        const auto descriptor_start = SteadyClock::now();
         if (!computeIrisDescriptor(keyframe)) {
 
             ++ iris_failures_;
@@ -333,6 +377,8 @@ namespace small_dlio {
             );
             return;
         }
+        const double descriptor_ms =
+            elapsedMs(descriptor_start, SteadyClock::now());
 
         ++ next_backend_keyframe_id_;
         if (pub_filtered_keyframe_)
@@ -362,8 +408,10 @@ namespace small_dlio {
         bool added_loop_edge = false;
         LoopCandidate accepted_candidate;
         bool has_accepted_candidate = false;
+        double loop_detect_ms = 0.0;
         if (loop_enable_) {
 
+            const auto loop_start = SteadyClock::now();
             LoopCandidate candidate;
             float best_distance = std::numeric_limits<float>::infinity();
             int eligible_count = 0;
@@ -410,7 +458,9 @@ namespace small_dlio {
                     candidate_misses_
                 );
             }
+            loop_detect_ms = elapsedMs(loop_start, SteadyClock::now());
         }
+        const double lcd_ms = descriptor_ms + loop_detect_ms;
 
         storeKeyFrame(std::move(keyframe));
         ++ stored_keyframes_;
@@ -423,19 +473,24 @@ namespace small_dlio {
                     addLoopCandidateToPoseGraph(accepted_candidate);
         }
 
+        double pgo_ms = 0.0;
         if (pgo_enable_)
-            optimizePoseGraphIfNeeded(added_loop_edge);
+            pgo_ms = optimizePoseGraphIfNeeded(added_loop_edge);
+
+        publishTiming(lcd_ms, pgo_ms, timing_stamp);
 
         RCLCPP_INFO_THROTTLE(
             get_logger(), *get_clock(), 2000,
             "Loop detector status: received=%lu stored=%lu graph_nodes=%zu "
-            "graph_edges=%zu candidates=%zu iris_fail=%lu",
+            "graph_edges=%zu candidates=%zu iris_fail=%lu lcd_ms=%.3f pgo_ms=%.3f",
             received_keyframes_,
             stored_keyframes_,
             pose_graph_.nodeCount(),
             pose_graph_.edgeCount(),
             loop_candidates_.size(),
-            iris_failures_
+            iris_failures_,
+            lcd_ms,
+            pgo_ms
         );
         publishLoopMarkers();
         if (pgo_enable_)
@@ -673,6 +728,105 @@ namespace small_dlio {
         return true;
     }
 
+    bool LoopDetectorNode::appendKeyFrameToSubmap(
+        const LoopKeyFrame &anchor,
+        const LoopKeyFrame &frame,
+        pcl::PointCloud<pcl::PointXYZ> &submap
+    ) const {
+
+        if (!frame.cloud || frame.cloud->empty())
+            return false;
+
+        const Eigen::Isometry3d T_world_anchor_body =
+            poseToIsometry(anchor.pose);
+        const Eigen::Isometry3d T_world_frame_body =
+            poseToIsometry(frame.pose);
+        if (!T_world_anchor_body.matrix().allFinite() ||
+            !T_world_frame_body.matrix().allFinite())
+            return false;
+
+        const Eigen::Isometry3d T_world_anchor_lidar =
+            T_world_anchor_body * T_body_lidar_;
+        const Eigen::Isometry3d T_world_frame_lidar =
+            T_world_frame_body * T_body_lidar_;
+        if (!T_world_anchor_lidar.matrix().allFinite() ||
+            !T_world_frame_lidar.matrix().allFinite())
+            return false;
+
+        const Eigen::Isometry3d T_anchor_lidar_frame_lidar =
+            T_world_anchor_lidar.inverse() * T_world_frame_lidar;
+        if (!T_anchor_lidar_frame_lidar.matrix().allFinite())
+            return false;
+
+        pcl::PointCloud<pcl::PointXYZ> transformed;
+        pcl::transformPointCloud(
+            *frame.cloud,
+            transformed,
+            T_anchor_lidar_frame_lidar.matrix().cast<float>()
+        );
+        submap += transformed;
+        return true;
+    }
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr LoopDetectorNode::buildLoopGicpSubmap(
+        const LoopKeyFrame &anchor
+    ) const {
+
+        auto submap = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        const int max_frames = std::max(1, loop_gicp_submap_keyframes_);
+
+        int used = 0;
+        if (appendKeyFrameToSubmap(anchor, anchor, *submap))
+            ++used;
+
+        int anchor_index = -1;
+        for (size_t i = 0; i < keyframes_.size(); ++i) {
+
+            if (keyframes_[i].id == anchor.id) {
+
+                anchor_index = static_cast<int>(i);
+                break;
+            }
+        }
+
+        int index = anchor_index >= 0
+            ? anchor_index - 1
+            : static_cast<int>(keyframes_.size()) - 1;
+
+        while (used < max_frames && index >= 0) {
+
+            if (appendKeyFrameToSubmap(anchor, keyframes_[static_cast<size_t>(index)], *submap))
+                ++used;
+            --index;
+        }
+
+        if (submap->empty())
+            return submap;
+
+        submap->width = static_cast<uint32_t>(submap->size());
+        submap->height = 1;
+        submap->is_dense = false;
+
+        if (loop_gicp_submap_leaf_size_ > 0.0) {
+
+            pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
+            voxel_filter.setLeafSize(
+                static_cast<float>(loop_gicp_submap_leaf_size_),
+                static_cast<float>(loop_gicp_submap_leaf_size_),
+                static_cast<float>(loop_gicp_submap_leaf_size_)
+            );
+            auto filtered = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+            voxel_filter.setInputCloud(submap);
+            voxel_filter.filter(*filtered);
+            filtered->width = static_cast<uint32_t>(filtered->size());
+            filtered->height = 1;
+            filtered->is_dense = false;
+            return filtered;
+        }
+
+        return submap;
+    }
+
     /**
      * @brief 使用 GICP 匹配潜在回环帧筛选真正回环帧
      * @param current 目前的点云帧
@@ -750,6 +904,27 @@ namespace small_dlio {
         if (!lidar_history_from_current.matrix().allFinite())
             return false;
 
+        pcl::PointCloud<pcl::PointXYZ>::Ptr source_cloud = current.cloud;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr target_cloud = history->cloud;
+        if (loop_gicp_use_submap_) {
+
+            source_cloud = buildLoopGicpSubmap(current);
+            target_cloud = buildLoopGicpSubmap(*history);
+            if (!source_cloud || source_cloud->empty() ||
+                !target_cloud || target_cloud->empty()) {
+
+                RCLCPP_WARN_THROTTLE(
+                    get_logger(), *get_clock(), 2000,
+                    "Loop GICP submap is empty: current=%u history=%u source=%zu target=%zu",
+                    candidate.current_id,
+                    candidate.history_id,
+                    source_cloud ? source_cloud->size() : 0U,
+                    target_cloud ? target_cloud->size() : 0U
+                );
+                return false;
+            }
+        }
+
         // 这里的 gicp 主要是对齐两个直接从 lidar 上获取的点云（一个是 history 一个是 current）
         const Eigen::Matrix4d init_guess = lidar_history_from_current.matrix();
         const double odom_yaw = yaw_from_matrix(init_guess);
@@ -761,11 +936,11 @@ namespace small_dlio {
             make_yaw_delta_init(init_guess, -iris_yaw);
 
         const GicpResult result =
-            gicp_matcher_.align(current.cloud, history->cloud, init_guess);
+            gicp_matcher_.align(source_cloud, target_cloud, init_guess);
         const GicpResult iris_pos_result =
-            gicp_matcher_.align(current.cloud, history->cloud, init_iris_pos);
+            gicp_matcher_.align(source_cloud, target_cloud, init_iris_pos);
         const GicpResult iris_neg_result =
-            gicp_matcher_.align(current.cloud, history->cloud, init_iris_neg);
+            gicp_matcher_.align(source_cloud, target_cloud, init_iris_neg);
 
         const auto odom_corr = result.success
             ? correction_delta(init_guess, result.transform)
@@ -786,6 +961,7 @@ namespace small_dlio {
         RCLCPP_INFO(
             get_logger(),
             "Loop init debug: current=%u history=%u iris=%.4f yaw_bias=%d "
+            "submap=%d points=[%zu %zu] "
             "odom_yaw=%.2f iris_yaw+=%.2f iris_yaw-=%.2f "
             "score=[odom %.4f iris+ %.4f iris- %.4f] "
             "corr_t=[%.3f %.3f %.3f] corr_r=[%.2f %.2f %.2f] "
@@ -794,6 +970,9 @@ namespace small_dlio {
             candidate.history_id,
             candidate.iris_distance,
             candidate.yaw_bias,
+            loop_gicp_use_submap_ ? 1 : 0,
+            source_cloud ? source_cloud->size() : 0U,
+            target_cloud ? target_cloud->size() : 0U,
             normalize_deg(odom_yaw * 180.0 / M_PI),
             normalize_deg(iris_yaw * 180.0 / M_PI),
             normalize_deg(-iris_yaw * 180.0 / M_PI),
@@ -896,11 +1075,14 @@ namespace small_dlio {
         RCLCPP_INFO(
             get_logger(),
             "Accepted loop by GICP: current=%u history=%u init=%s iris=%.4f "
-            "score=%.4f corr_t=%.3f corr_r=%.2f",
+            "submap=%d points=[%zu %zu] score=%.4f corr_t=%.3f corr_r=%.2f",
             candidate.current_id,
             candidate.history_id,
             best_trial->label,
             candidate.iris_distance,
+            loop_gicp_use_submap_ ? 1 : 0,
+            source_cloud ? source_cloud->size() : 0U,
+            target_cloud ? target_cloud->size() : 0U,
             candidate.gicp_score,
             corr_t,
             corr_r_deg
@@ -1199,38 +1381,43 @@ namespace small_dlio {
         );
     }
 
-    void LoopDetectorNode::optimizePoseGraphIfNeeded(
+    double LoopDetectorNode::optimizePoseGraphIfNeeded(
         const bool has_new_loop
     ) {
 
         if (!pgo_enable_)
-            return;
+            return 0.0;
         if (pgo_optimize_on_loop_ && !has_new_loop)
-            return;
+            return 0.0;
 
+        const auto pgo_start = SteadyClock::now();
         const PoseGraphOptimizationSummary summary = pose_graph_.optimize();
+        const double pgo_ms = elapsedMs(pgo_start, SteadyClock::now());
         if (!summary.success) {
 
             RCLCPP_WARN_THROTTLE(
                 get_logger(), *get_clock(), 2000,
-                "PGO skipped/failed: %s nodes=%d edges=%d",
+                "PGO skipped/failed: %s nodes=%d edges=%d pgo_ms=%.3f",
                 summary.message.c_str(),
                 summary.node_count,
-                summary.edge_count
+                summary.edge_count,
+                pgo_ms
             );
-            return;
+            return pgo_ms;
         }
 
         RCLCPP_INFO(
             get_logger(),
-            "PGO optimized: iter=%d nodes=%d edges=%d chi2 %.3f -> %.3f",
+            "PGO optimized: iter=%d nodes=%d edges=%d chi2 %.3f -> %.3f pgo_ms=%.3f",
             summary.iterations,
             summary.node_count,
             summary.edge_count,
             summary.initial_chi2,
-            summary.final_chi2
+            summary.final_chi2,
+            pgo_ms
         );
         publishOptimizedKeyFrames();
+        return pgo_ms;
     }
 
     void LoopDetectorNode::publishOptimizedKeyFrames() const {
@@ -1399,6 +1586,32 @@ namespace small_dlio {
             path.poses.size(),
             pose_graph_.nodeCount(),
             pose_graph_.edgeCount()
+        );
+    }
+
+    void LoopDetectorNode::publishTiming(
+        const double lcd_ms,
+        const double pgo_ms,
+        const rclcpp::Time &stamp
+    ) const {
+
+        if (!pub_timing_)
+            return;
+
+        geometry_msgs::msg::Vector3Stamped msg;
+        msg.header.stamp = stamp;
+        msg.header.frame_id = marker_frame_;
+        msg.vector.x = lcd_ms;
+        msg.vector.y = pgo_ms;
+        msg.vector.z = lcd_ms + pgo_ms;
+        pub_timing_->publish(msg);
+
+        RCLCPP_INFO(
+            get_logger(),
+            "LCD/PGO timing: lcd_ms=%.3f pgo_ms=%.3f total_ms=%.3f",
+            msg.vector.x,
+            msg.vector.y,
+            msg.vector.z
         );
     }
 

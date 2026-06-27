@@ -85,6 +85,10 @@ add_library(small_dlio_pose_graph STATIC
   src/pose_graph.cpp
 )
 
+add_library(small_dlio_cart_context STATIC
+  src/cart_context.cpp
+)
+
 target_include_directories(small_dlio_pose_graph
   PUBLIC
     include
@@ -98,6 +102,19 @@ target_link_libraries(small_dlio_pose_graph
     ${G2O_STUFF_LIBRARY}
     ${G2O_TYPES_SLAM3D_LIBRARY}
     ${G2O_SOLVER_EIGEN_LIBRARY}
+)
+
+target_include_directories(small_dlio_cart_context
+  PUBLIC
+    include
+    include/small_dlio
+    ${PCL_INCLUDE_DIRS}
+)
+
+target_link_libraries(small_dlio_cart_context
+  PUBLIC
+    Eigen3::Eigen
+    ${PCL_LIBRARIES}
 )
 
 add_executable(dlio_node

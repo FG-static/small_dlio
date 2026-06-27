@@ -5,6 +5,7 @@ small_dlio_loop_detector:
     marker_topic: "/loop_candidates_marker"
     optimized_path_topic: "/optimized_path"
     optimized_keyframes_topic: "/optimized_keyframes"
+    timing_topic: "/lcd_pgo_timing"
     marker_frame: "odom"
     body_frame: "body"
     lidar_frame: "livox_frame"
@@ -41,6 +42,9 @@ small_dlio_loop_detector:
     loop_gicp_score_thresh: 1.0
     loop_gicp_max_correction_trans: 2.5
     loop_gicp_max_correction_rot_deg: 25.0
+    loop_gicp_use_submap: true
+    loop_gicp_submap_keyframes: 7
+    loop_gicp_submap_leaf_size: 0.15
     loop_gicp_num_threads: 4
     loop_gicp_correspondence_randomness: 20
     loop_gicp_max_correspondence_distance: 1.5
