@@ -224,6 +224,7 @@ target_link_libraries(loop_detector_node
   ${OpenCV_LIBS}
   small_dlio_gicp
   small_dlio_pose_graph
+  small_dlio_cart_context
   lidar_iris_vendor
   "${cpp_typesupport_target}"
 )

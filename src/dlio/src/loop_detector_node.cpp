@@ -13,6 +13,7 @@
 #include <limits>
 #include <pcl/common/transforms.h>
 #include <pcl/filters/voxel_grid.h>
+#include <sstream>
 #include <rclcpp/qos_overriding_options.hpp>
 #include <utility>
 
@@ -42,6 +43,19 @@ namespace small_dlio {
             iris_sigma_onf_,
             iris_match_num_
         );
+        if (cart_enable_) {
+
+            CartContext::Params cart_params;
+            cart_params.x_unit_m = cart_x_unit_m_;
+            cart_params.y_unit_m = cart_y_unit_m_;
+            cart_params.x_max_m = cart_x_max_m_;
+            cart_params.y_max_m = cart_y_max_m_;
+            cart_params.voxel_leaf_m = cart_voxel_leaf_m_;
+            cart_params.height_offset_m = cart_height_offset_m_;
+            cart_params.use_align_key = cart_use_align_key_;
+            cart_params.align_search_ratio = cart_align_search_ratio_;
+            cart_context_ = std::make_unique<CartContext>(cart_params);
+        }
 
         gicp_matcher_.configure(GicpParams{
             loop_gicp_num_threads_,
@@ -137,6 +151,14 @@ namespace small_dlio {
         declare_parameter("loop_gicp_score_thresh", loop_gicp_score_thresh_);
         declare_parameter("loop_gicp_max_correction_trans", loop_gicp_max_correction_trans_);
         declare_parameter("loop_gicp_max_correction_rot_deg", loop_gicp_max_correction_rot_deg_);
+        declare_parameter(
+            "loop_gicp_selection_correction_trans_weight",
+            loop_gicp_selection_correction_trans_weight_
+        );
+        declare_parameter(
+            "loop_gicp_selection_correction_rot_weight",
+            loop_gicp_selection_correction_rot_weight_
+        );
         declare_parameter("loop_gicp_use_submap", loop_gicp_use_submap_);
         declare_parameter("loop_gicp_submap_keyframes", loop_gicp_submap_keyframes_);
         declare_parameter("loop_gicp_submap_leaf_size", loop_gicp_submap_leaf_size_);
@@ -154,6 +176,8 @@ namespace small_dlio {
         declare_parameter("pgo_max_iterations", pgo_max_iterations_);
         declare_parameter("pgo_odom_edge_weight", pgo_odom_edge_weight_);
         declare_parameter("pgo_loop_edge_weight", pgo_loop_edge_weight_);
+        declare_parameter("loop_edge_min_current_gap", loop_edge_min_current_gap_);
+        declare_parameter("loop_edge_min_travel_gap", loop_edge_min_travel_gap_);
         declare_parameter("pgo_odom_info_diag", std::vector<double>{});
         declare_parameter("pgo_loop_info_diag", std::vector<double>{});
         declare_parameter("iris_nscale", iris_nscale_);
@@ -161,6 +185,19 @@ namespace small_dlio {
         declare_parameter("iris_mult", iris_mult_);
         declare_parameter("iris_sigma_onf", iris_sigma_onf_);
         declare_parameter("iris_match_num", iris_match_num_);
+        declare_parameter("cart_enable", cart_enable_);
+        declare_parameter("cart_x_unit_m", cart_x_unit_m_);
+        declare_parameter("cart_y_unit_m", cart_y_unit_m_);
+        declare_parameter("cart_x_max_m", cart_x_max_m_);
+        declare_parameter("cart_y_max_m", cart_y_max_m_);
+        declare_parameter("cart_voxel_leaf_m", cart_voxel_leaf_m_);
+        declare_parameter("cart_height_offset_m", cart_height_offset_m_);
+        declare_parameter("cart_use_align_key", cart_use_align_key_);
+        declare_parameter("cart_align_search_ratio", cart_align_search_ratio_);
+        declare_parameter("cart_weight", cart_weight_);
+        declare_parameter("iris_weight", iris_weight_);
+        declare_parameter("cart_candidate_top_k", cart_candidate_top_k_);
+        declare_parameter("loop_fused_distance_thresh", loop_fused_distance_thresh_);
         declare_parameter("optimized_keyframes_topic", optimized_keyframes_topic_);
 
         get_parameter("keyframe_topic", keyframe_topic_);
@@ -181,6 +218,14 @@ namespace small_dlio {
         get_parameter("loop_gicp_score_thresh", loop_gicp_score_thresh_);
         get_parameter("loop_gicp_max_correction_trans", loop_gicp_max_correction_trans_);
         get_parameter("loop_gicp_max_correction_rot_deg", loop_gicp_max_correction_rot_deg_);
+        get_parameter(
+            "loop_gicp_selection_correction_trans_weight",
+            loop_gicp_selection_correction_trans_weight_
+        );
+        get_parameter(
+            "loop_gicp_selection_correction_rot_weight",
+            loop_gicp_selection_correction_rot_weight_
+        );
         get_parameter("loop_gicp_use_submap", loop_gicp_use_submap_);
         get_parameter("loop_gicp_submap_keyframes", loop_gicp_submap_keyframes_);
         get_parameter("loop_gicp_submap_leaf_size", loop_gicp_submap_leaf_size_);
@@ -198,6 +243,8 @@ namespace small_dlio {
         get_parameter("pgo_max_iterations", pgo_max_iterations_);
         get_parameter("pgo_odom_edge_weight", pgo_odom_edge_weight_);
         get_parameter("pgo_loop_edge_weight", pgo_loop_edge_weight_);
+        get_parameter("loop_edge_min_current_gap", loop_edge_min_current_gap_);
+        get_parameter("loop_edge_min_travel_gap", loop_edge_min_travel_gap_);
         get_parameter("pgo_odom_info_diag", pgo_odom_info_diag_);
         get_parameter("pgo_loop_info_diag", pgo_loop_info_diag_);
         get_parameter("iris_nscale", iris_nscale_);
@@ -205,6 +252,19 @@ namespace small_dlio {
         get_parameter("iris_mult", iris_mult_);
         get_parameter("iris_sigma_onf", iris_sigma_onf_);
         get_parameter("iris_match_num", iris_match_num_);
+        get_parameter("cart_enable", cart_enable_);
+        get_parameter("cart_x_unit_m", cart_x_unit_m_);
+        get_parameter("cart_y_unit_m", cart_y_unit_m_);
+        get_parameter("cart_x_max_m", cart_x_max_m_);
+        get_parameter("cart_y_max_m", cart_y_max_m_);
+        get_parameter("cart_voxel_leaf_m", cart_voxel_leaf_m_);
+        get_parameter("cart_height_offset_m", cart_height_offset_m_);
+        get_parameter("cart_use_align_key", cart_use_align_key_);
+        get_parameter("cart_align_search_ratio", cart_align_search_ratio_);
+        get_parameter("cart_weight", cart_weight_);
+        get_parameter("iris_weight", iris_weight_);
+        get_parameter("cart_candidate_top_k", cart_candidate_top_k_);
+        get_parameter("loop_fused_distance_thresh", loop_fused_distance_thresh_);
         get_parameter("optimized_keyframes_topic", optimized_keyframes_topic_);
 
         if (loop_gicp_submap_keyframes_ < 1)
@@ -212,6 +272,41 @@ namespace small_dlio {
         if (!std::isfinite(loop_gicp_submap_leaf_size_) ||
             loop_gicp_submap_leaf_size_ < 0.0)
             loop_gicp_submap_leaf_size_ = 0.0;
+        if (!std::isfinite(loop_gicp_selection_correction_trans_weight_) ||
+            loop_gicp_selection_correction_trans_weight_ < 0.0)
+            loop_gicp_selection_correction_trans_weight_ = 0.0;
+        if (!std::isfinite(loop_gicp_selection_correction_rot_weight_) ||
+            loop_gicp_selection_correction_rot_weight_ < 0.0)
+            loop_gicp_selection_correction_rot_weight_ = 0.0;
+        if (!std::isfinite(cart_x_unit_m_) || cart_x_unit_m_ <= 0.0)
+            cart_x_unit_m_ = 0.5;
+        if (!std::isfinite(cart_y_unit_m_) || cart_y_unit_m_ <= 0.0)
+            cart_y_unit_m_ = 0.1;
+        if (!std::isfinite(cart_x_max_m_) || cart_x_max_m_ <= 0.0)
+            cart_x_max_m_ = 50.0;
+        if (!std::isfinite(cart_y_max_m_) || cart_y_max_m_ <= 0.0)
+            cart_y_max_m_ = 25.0;
+        if (!std::isfinite(cart_voxel_leaf_m_) || cart_voxel_leaf_m_ < 0.0)
+            cart_voxel_leaf_m_ = 0.0;
+        if (!std::isfinite(cart_align_search_ratio_) ||
+            cart_align_search_ratio_ <= 0.0)
+            cart_align_search_ratio_ = 1.0;
+        if (!std::isfinite(cart_weight_) || cart_weight_ < 0.0)
+            cart_weight_ = 0.0;
+        if (!std::isfinite(iris_weight_) || iris_weight_ < 0.0)
+            iris_weight_ = 1.0;
+        if (cart_weight_ <= 0.0)
+            cart_enable_ = false;
+        if (cart_candidate_top_k_ < 1)
+            cart_candidate_top_k_ = 1;
+        if (!std::isfinite(loop_fused_distance_thresh_) ||
+            loop_fused_distance_thresh_ <= 0.0)
+            loop_fused_distance_thresh_ = 1.0;
+        if (loop_edge_min_current_gap_ < 0)
+            loop_edge_min_current_gap_ = 0;
+        if (!std::isfinite(loop_edge_min_travel_gap_) ||
+            loop_edge_min_travel_gap_ < 0.0)
+            loop_edge_min_travel_gap_ = 0.0;
 
         auto read_body_lidar_extrinsic = [this]() {
             const std::vector<double> t_default = {0.0, 0.0, 0.0};
@@ -328,6 +423,36 @@ namespace small_dlio {
             loop_gicp_submap_keyframes_,
             loop_gicp_submap_leaf_size_
         );
+        RCLCPP_INFO(
+            get_logger(),
+            "Loop GICP selection cost: score + %.3f*odom_delta_t + %.3f*odom_delta_r_deg",
+            loop_gicp_selection_correction_trans_weight_,
+            loop_gicp_selection_correction_rot_weight_
+        );
+        RCLCPP_INFO(
+            get_logger(),
+            "Loop edge sparsification: min_current_gap=%d min_travel_gap=%.3f",
+            loop_edge_min_current_gap_,
+            loop_edge_min_travel_gap_
+        );
+        RCLCPP_INFO(
+            get_logger(),
+            "Cart Context: enabled=%d unit=[%.3f %.3f] range=[%.1f %.1f] "
+            "voxel=%.3f align_key=%d align_ratio=%.3f weights=[iris %.3f cart %.3f] "
+            "top_k=%d fused_thresh=%.3f",
+            cart_enable_ ? 1 : 0,
+            cart_x_unit_m_,
+            cart_y_unit_m_,
+            cart_x_max_m_,
+            cart_y_max_m_,
+            cart_voxel_leaf_m_,
+            cart_use_align_key_ ? 1 : 0,
+            cart_align_search_ratio_,
+            iris_weight_,
+            cart_weight_,
+            cart_candidate_top_k_,
+            loop_fused_distance_thresh_
+        );
     }
 
     void LoopDetectorNode::callbackKeyFrame(
@@ -372,6 +497,17 @@ namespace small_dlio {
             RCLCPP_WARN_THROTTLE(
                 get_logger(), *get_clock(), 2000,
                 "Failed to compute LiDAR-Iris descriptor: id=%u cloud_size=%zu",
+                keyframe.id,
+                keyframe.cloud ? keyframe.cloud->size() : 0U
+            );
+            return;
+        }
+        if (!computeCartDescriptor(keyframe)) {
+
+            ++ iris_failures_;
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "Failed to compute Cart Context descriptor: id=%u cloud_size=%zu",
                 keyframe.id,
                 keyframe.cloud ? keyframe.cloud->size() : 0U
             );
@@ -427,11 +563,16 @@ namespace small_dlio {
                     RCLCPP_INFO(
                         get_logger(),
                         "Loop candidate: current=%u history=%u iris=%.4f "
+                        "cart=%.4f fused=%.4f cart_shift=%d cart_lat=%.3f "
                         "yaw_bias=%d gicp_enable=%d gicp_score=%.4f "
                         "corr_t=%.3f corr_r=%.2f",
                         candidate.current_id,
                         candidate.history_id,
                         candidate.iris_distance,
+                        candidate.cart_distance,
+                        candidate.fused_distance,
+                        candidate.cart_shift_cols,
+                        candidate.cart_lateral_offset_m,
                         candidate.yaw_bias,
                         loop_gicp_enable_ ? 1 : 0,
                         candidate.gicp_score,
@@ -444,13 +585,14 @@ namespace small_dlio {
                 ++ candidate_misses_;
                 RCLCPP_INFO_THROTTLE(
                     get_logger(), *get_clock(), 2000,
-                    "Loop candidate miss: current=%u eligible=%d best_iris=%.4f "
-                    "thresh=%.4f stored=%zu received=%lu iris_fail=%lu "
+                    "Loop candidate miss: current=%u eligible=%d best_score=%.4f "
+                    "iris_thresh=%.4f fused_thresh=%.4f stored=%zu received=%lu iris_fail=%lu "
                     "hits=%lu misses=%lu",
                     keyframe.id,
                     eligible_count,
                     best_distance,
                     loop_iris_distance_thresh_,
+                    loop_fused_distance_thresh_,
                     keyframes_.size(),
                     received_keyframes_,
                     iris_failures_,
@@ -468,9 +610,43 @@ namespace small_dlio {
         if (has_accepted_candidate) {
 
             loop_candidates_.push_back(accepted_candidate);
-            if (pgo_node_added && pgo_enable_)
-                added_loop_edge =
-                    addLoopCandidateToPoseGraph(accepted_candidate);
+            if (pgo_node_added && pgo_enable_) {
+
+                int current_gap = 0;
+                double travel_gap = 0.0;
+                if (shouldAddLoopEdgeToPoseGraph(
+                        accepted_candidate,
+                        current_gap,
+                        travel_gap)) {
+
+                    added_loop_edge =
+                        addLoopCandidateToPoseGraph(accepted_candidate);
+                    if (added_loop_edge) {
+
+                        has_last_added_loop_edge_ = true;
+                        last_added_loop_current_id_ =
+                            accepted_candidate.current_id;
+                        const auto *current =
+                            findKeyFrame(accepted_candidate.current_id);
+                        if (current)
+                            last_added_loop_current_travel_distance_ =
+                                current->travel_distance;
+                    }
+                } else {
+
+                    RCLCPP_INFO(
+                        get_logger(),
+                        "Skipped loop edge by sparsification: current=%u history=%u "
+                        "current_gap=%d/%d travel_gap=%.3f/%.3f",
+                        accepted_candidate.current_id,
+                        accepted_candidate.history_id,
+                        current_gap,
+                        loop_edge_min_current_gap_,
+                        travel_gap,
+                        loop_edge_min_travel_gap_
+                    );
+                }
+            }
         }
 
         double pgo_ms = 0.0;
@@ -668,6 +844,27 @@ namespace small_dlio {
             !keyframe.iris_descriptor.M.empty();
     }
 
+    bool LoopDetectorNode::computeCartDescriptor(
+        LoopKeyFrame &keyframe
+    ) const {
+
+        keyframe.has_cart_descriptor = false;
+        if (!cart_enable_)
+            return true;
+        if (!cart_context_ || !keyframe.cloud || keyframe.cloud->empty())
+            return false;
+
+        keyframe.cart_descriptor =
+            cart_context_->makeDescriptor(*keyframe.cloud);
+        const bool valid =
+            keyframe.cart_descriptor.image.rows() == cart_context_->numX() &&
+            keyframe.cart_descriptor.image.cols() == cart_context_->numY() &&
+            keyframe.cart_descriptor.image.size() > 0 &&
+            keyframe.cart_descriptor.image.cwiseAbs().maxCoeff() > 1e-6F;
+        keyframe.has_cart_descriptor = valid;
+        return valid;
+    }
+
     bool LoopDetectorNode::detectLoopCandidate(
         const LoopKeyFrame &current,
         LoopCandidate &candidate
@@ -688,9 +885,16 @@ namespace small_dlio {
 
         best_distance = std::numeric_limits<float>::infinity();
         eligible_count = 0;
-        int best_yaw_bias = 0;
-        uint32_t best_history_id = 0;
-        bool found = false;
+
+        struct IrisHit {
+
+            const LoopKeyFrame *history = nullptr;
+            float iris_distance = std::numeric_limits<float>::infinity();
+            int yaw_bias = 0;
+        };
+
+        std::vector<IrisHit> iris_hits;
+        iris_hits.reserve(static_cast<size_t>(cart_candidate_top_k_));
 
         // O(N * C) kNN search, it will be exchange in the future
         for (const auto &history : keyframes_) {
@@ -709,22 +913,82 @@ namespace small_dlio {
             if (!std::isfinite(dis))
                 continue;
 
-            if (dis < best_distance) {
+            if (dis >= loop_iris_distance_thresh_)
+                continue;
 
-                best_distance = dis;
-                best_yaw_bias = yaw_bias;
-                best_history_id = history.id;
+            iris_hits.push_back(IrisHit{&history, dis, yaw_bias});
+            std::sort(
+                iris_hits.begin(),
+                iris_hits.end(),
+                [](const IrisHit &a, const IrisHit &b) {
+                    return a.iris_distance < b.iris_distance;
+                }
+            );
+            if (static_cast<int>(iris_hits.size()) > cart_candidate_top_k_)
+                iris_hits.pop_back();
+        }
+
+        bool found = false;
+        LoopCandidate best_candidate;
+
+        for (const IrisHit &hit : iris_hits) {
+
+            if (!hit.history)
+                continue;
+
+            float cart_distance = 0.0F;
+            int cart_shift_cols = 0;
+            double cart_lateral_offset_m = 0.0;
+            float fused_distance = hit.iris_distance;
+
+            if (cart_enable_) {
+
+                if (!cart_context_ ||
+                    !current.has_cart_descriptor ||
+                    !hit.history->has_cart_descriptor)
+                    continue;
+
+                const CartContext::MatchResult cart_result =
+                    cart_context_->compare(
+                        current.cart_descriptor,
+                        hit.history->cart_descriptor
+                    );
+                if (!cart_result.valid ||
+                    !std::isfinite(cart_result.distance))
+                    continue;
+
+                cart_distance = cart_result.distance;
+                cart_shift_cols = cart_result.shift_cols;
+                cart_lateral_offset_m = cart_result.lateral_offset_m;
+                fused_distance =
+                    static_cast<float>(
+                        iris_weight_ * hit.iris_distance +
+                        cart_weight_ * cart_distance
+                    );
+            }
+
+            if (!std::isfinite(fused_distance))
+                continue;
+
+            if (fused_distance < best_distance) {
+
+                best_distance = fused_distance;
+                best_candidate.current_id = current.id;
+                best_candidate.history_id = hit.history->id;
+                best_candidate.iris_distance = hit.iris_distance;
+                best_candidate.cart_distance = cart_distance;
+                best_candidate.fused_distance = fused_distance;
+                best_candidate.cart_shift_cols = cart_shift_cols;
+                best_candidate.cart_lateral_offset_m = cart_lateral_offset_m;
+                best_candidate.yaw_bias = hit.yaw_bias;
                 found = true;
             }
         }
 
-        if (!found || best_distance >= loop_iris_distance_thresh_)
+        if (!found || best_distance >= loop_fused_distance_thresh_)
             return false;
 
-        candidate.current_id = current.id;
-        candidate.history_id = best_history_id;
-        candidate.iris_distance = best_distance;
-        candidate.yaw_bias = best_yaw_bias;
+        candidate = best_candidate;
         return true;
     }
 
@@ -875,6 +1139,16 @@ namespace small_dlio {
             return init;
         };
 
+        auto make_lateral_delta_init = [](
+            const Eigen::Matrix4d &base,
+            const double lateral_m
+        ) {
+
+            Eigen::Matrix4d init = base;
+            init(1, 3) += lateral_m;
+            return init;
+        };
+
         auto correction_delta = [](
             const Eigen::Matrix4d &init,
             const Eigen::Matrix4d &final
@@ -935,67 +1209,15 @@ namespace small_dlio {
         const Eigen::Matrix4d init_iris_neg =
             make_yaw_delta_init(init_guess, -iris_yaw);
 
-        const GicpResult result =
-            gicp_matcher_.align(source_cloud, target_cloud, init_guess);
-        const GicpResult iris_pos_result =
-            gicp_matcher_.align(source_cloud, target_cloud, init_iris_pos);
-        const GicpResult iris_neg_result =
-            gicp_matcher_.align(source_cloud, target_cloud, init_iris_neg);
-
-        const auto odom_corr = result.success
-            ? correction_delta(init_guess, result.transform)
-            : std::make_pair(
-                std::numeric_limits<double>::infinity(),
-                std::numeric_limits<double>::infinity());
-        const auto iris_pos_corr = iris_pos_result.success
-            ? correction_delta(init_iris_pos, iris_pos_result.transform)
-            : std::make_pair(
-                std::numeric_limits<double>::infinity(),
-                std::numeric_limits<double>::infinity());
-        const auto iris_neg_corr = iris_neg_result.success
-            ? correction_delta(init_iris_neg, iris_neg_result.transform)
-            : std::make_pair(
-                std::numeric_limits<double>::infinity(),
-                std::numeric_limits<double>::infinity());
-
-        RCLCPP_INFO(
-            get_logger(),
-            "Loop init debug: current=%u history=%u iris=%.4f yaw_bias=%d "
-            "submap=%d points=[%zu %zu] "
-            "odom_yaw=%.2f iris_yaw+=%.2f iris_yaw-=%.2f "
-            "score=[odom %.4f iris+ %.4f iris- %.4f] "
-            "corr_t=[%.3f %.3f %.3f] corr_r=[%.2f %.2f %.2f] "
-            "success=[%d %d %d]",
-            candidate.current_id,
-            candidate.history_id,
-            candidate.iris_distance,
-            candidate.yaw_bias,
-            loop_gicp_use_submap_ ? 1 : 0,
-            source_cloud ? source_cloud->size() : 0U,
-            target_cloud ? target_cloud->size() : 0U,
-            normalize_deg(odom_yaw * 180.0 / M_PI),
-            normalize_deg(iris_yaw * 180.0 / M_PI),
-            normalize_deg(-iris_yaw * 180.0 / M_PI),
-            result.score,
-            iris_pos_result.score,
-            iris_neg_result.score,
-            odom_corr.first,
-            iris_pos_corr.first,
-            iris_neg_corr.first,
-            odom_corr.second,
-            iris_pos_corr.second,
-            iris_neg_corr.second,
-            result.success ? 1 : 0,
-            iris_pos_result.success ? 1 : 0,
-            iris_neg_result.success ? 1 : 0
-        );
-
         struct GicpTrial {
 
-            const char *label = "";
+            std::string label;
             GicpResult result;
             double correction_trans = std::numeric_limits<double>::infinity();
             double correction_rot_deg = std::numeric_limits<double>::infinity();
+            double odom_delta_trans = std::numeric_limits<double>::infinity();
+            double odom_delta_rot_deg = std::numeric_limits<double>::infinity();
+            double selection_cost = std::numeric_limits<double>::infinity();
             bool accepted = false;
         };
 
@@ -1009,56 +1231,172 @@ namespace small_dlio {
                 trial.correction_trans <= loop_gicp_max_correction_trans_ &&
                 std::isfinite(trial.correction_rot_deg) &&
                 trial.correction_rot_deg <= loop_gicp_max_correction_rot_deg_;
+            if (trial.accepted) {
+
+                trial.selection_cost =
+                    trial.result.score +
+                    loop_gicp_selection_correction_trans_weight_ *
+                        trial.odom_delta_trans +
+                    loop_gicp_selection_correction_rot_weight_ *
+                        trial.odom_delta_rot_deg;
+            }
             return trial;
         };
 
-        const GicpTrial odom_trial = evaluate_trial(GicpTrial{
-            "odom",
-            result,
-            odom_corr.first,
-            odom_corr.second,
-            false
-        });
-        const GicpTrial iris_pos_trial = evaluate_trial(GicpTrial{
-            "iris+",
-            iris_pos_result,
-            iris_pos_corr.first,
-            iris_pos_corr.second,
-            false
-        });
-        const GicpTrial iris_neg_trial = evaluate_trial(GicpTrial{
-            "iris-",
-            iris_neg_result,
-            iris_neg_corr.first,
-            iris_neg_corr.second,
-            false
-        });
+        struct InitGuess {
+
+            std::string label;
+            Eigen::Matrix4d transform = Eigen::Matrix4d::Identity();
+        };
+
+        std::vector<InitGuess> init_guesses;
+        init_guesses.push_back({"odom", init_guess});
+        init_guesses.push_back({"iris+", init_iris_pos});
+        init_guesses.push_back({"iris-", init_iris_neg});
+
+        const bool has_cart_lateral =
+            cart_enable_ &&
+            std::isfinite(candidate.cart_lateral_offset_m) &&
+            std::abs(candidate.cart_lateral_offset_m) > 1e-6;
+        if (has_cart_lateral) {
+
+            const double cart_lat = candidate.cart_lateral_offset_m;
+            init_guesses.push_back({
+                "cart+",
+                make_lateral_delta_init(init_guess, cart_lat)
+            });
+            init_guesses.push_back({
+                "cart-",
+                make_lateral_delta_init(init_guess, -cart_lat)
+            });
+            init_guesses.push_back({
+                "iris+cart+",
+                make_lateral_delta_init(init_iris_pos, cart_lat)
+            });
+            init_guesses.push_back({
+                "iris+cart-",
+                make_lateral_delta_init(init_iris_pos, -cart_lat)
+            });
+            init_guesses.push_back({
+                "iris-cart+",
+                make_lateral_delta_init(init_iris_neg, cart_lat)
+            });
+            init_guesses.push_back({
+                "iris-cart-",
+                make_lateral_delta_init(init_iris_neg, -cart_lat)
+            });
+        }
+
+        std::vector<GicpTrial> trials;
+        trials.reserve(init_guesses.size());
+        for (const auto &init : init_guesses) {
+
+            const GicpResult result =
+                gicp_matcher_.align(source_cloud, target_cloud, init.transform);
+            const auto corr = result.success
+                ? correction_delta(init.transform, result.transform)
+                : std::make_pair(
+                    std::numeric_limits<double>::infinity(),
+                    std::numeric_limits<double>::infinity());
+            const auto odom_delta = result.success
+                ? correction_delta(init_guess, result.transform)
+                : std::make_pair(
+                    std::numeric_limits<double>::infinity(),
+                    std::numeric_limits<double>::infinity());
+            trials.push_back(
+                evaluate_trial(GicpTrial{
+                    init.label,
+                    result,
+                    corr.first,
+                    corr.second,
+                    odom_delta.first,
+                    odom_delta.second,
+                    std::numeric_limits<double>::infinity(),
+                    false
+                })
+            );
+        }
+
+        std::ostringstream score_stream;
+        std::ostringstream cost_stream;
+        std::ostringstream corr_t_stream;
+        std::ostringstream corr_r_stream;
+        std::ostringstream odom_delta_t_stream;
+        std::ostringstream odom_delta_r_stream;
+        std::ostringstream accepted_stream;
+        for (const auto &trial : trials) {
+
+            score_stream
+                << trial.label << " " << trial.result.score << " ";
+            cost_stream
+                << trial.label << " " << trial.selection_cost << " ";
+            corr_t_stream
+                << trial.label << " " << trial.correction_trans << " ";
+            corr_r_stream
+                << trial.label << " " << trial.correction_rot_deg << " ";
+            odom_delta_t_stream
+                << trial.label << " " << trial.odom_delta_trans << " ";
+            odom_delta_r_stream
+                << trial.label << " " << trial.odom_delta_rot_deg << " ";
+            accepted_stream
+                << trial.label << " " << (trial.accepted ? 1 : 0) << " ";
+        }
+
+        RCLCPP_INFO(
+            get_logger(),
+            "Loop init debug: current=%u history=%u iris=%.4f cart=%.4f "
+            "fused=%.4f cart_shift=%d cart_lat=%.3f yaw_bias=%d "
+            "submap=%d points=[%zu %zu] "
+            "odom_yaw=%.2f iris_yaw+=%.2f iris_yaw-=%.2f "
+            "score=[%s] cost=[%s] corr_t=[%s] corr_r=[%s] "
+            "odom_delta_t=[%s] odom_delta_r=[%s] accepted=[%s]",
+            candidate.current_id,
+            candidate.history_id,
+            candidate.iris_distance,
+            candidate.cart_distance,
+            candidate.fused_distance,
+            candidate.cart_shift_cols,
+            candidate.cart_lateral_offset_m,
+            candidate.yaw_bias,
+            loop_gicp_use_submap_ ? 1 : 0,
+            source_cloud ? source_cloud->size() : 0U,
+            target_cloud ? target_cloud->size() : 0U,
+            normalize_deg(odom_yaw * 180.0 / M_PI),
+            normalize_deg(iris_yaw * 180.0 / M_PI),
+            normalize_deg(-iris_yaw * 180.0 / M_PI),
+            score_stream.str().c_str(),
+            cost_stream.str().c_str(),
+            corr_t_stream.str().c_str(),
+            corr_r_stream.str().c_str(),
+            odom_delta_t_stream.str().c_str(),
+            odom_delta_r_stream.str().c_str(),
+            accepted_stream.str().c_str()
+        );
 
         const GicpTrial *best_trial = nullptr;
-        for (const auto *trial :
-             {&odom_trial, &iris_pos_trial, &iris_neg_trial}) {
+        for (const auto &trial : trials) {
 
-            if (!trial->accepted)
+            if (!trial.accepted)
                 continue;
-            if (!best_trial || trial->result.score < best_trial->result.score)
-                best_trial = trial;
+            if (!best_trial ||
+                trial.selection_cost < best_trial->selection_cost)
+                best_trial = &trial;
         }
 
         if (!best_trial) {
 
             RCLCPP_WARN_THROTTLE(
                 get_logger(), *get_clock(), 2000,
-                "Loop GICP rejected: current=%u history=%u iris=%.4f "
-                "accepted=[odom %d iris+ %d iris- %d] score=[%.4f %.4f %.4f]",
+                "Loop GICP rejected: current=%u history=%u iris=%.4f cart=%.4f fused=%.4f "
+                "accepted=[%s] score=[%s] cost=[%s]",
                 candidate.current_id,
                 candidate.history_id,
                 candidate.iris_distance,
-                odom_trial.accepted ? 1 : 0,
-                iris_pos_trial.accepted ? 1 : 0,
-                iris_neg_trial.accepted ? 1 : 0,
-                result.score,
-                iris_pos_result.score,
-                iris_neg_result.score
+                candidate.cart_distance,
+                candidate.fused_distance,
+                accepted_stream.str().c_str(),
+                score_stream.str().c_str(),
+                cost_stream.str().c_str()
             );
             return false;
         }
@@ -1075,15 +1413,21 @@ namespace small_dlio {
         RCLCPP_INFO(
             get_logger(),
             "Accepted loop by GICP: current=%u history=%u init=%s iris=%.4f "
-            "submap=%d points=[%zu %zu] score=%.4f corr_t=%.3f corr_r=%.2f",
+            "cart=%.4f fused=%.4f cart_shift=%d cart_lat=%.3f "
+            "submap=%d points=[%zu %zu] score=%.4f cost=%.4f corr_t=%.3f corr_r=%.2f",
             candidate.current_id,
             candidate.history_id,
-            best_trial->label,
+            best_trial->label.c_str(),
             candidate.iris_distance,
+            candidate.cart_distance,
+            candidate.fused_distance,
+            candidate.cart_shift_cols,
+            candidate.cart_lateral_offset_m,
             loop_gicp_use_submap_ ? 1 : 0,
             source_cloud ? source_cloud->size() : 0U,
             target_cloud ? target_cloud->size() : 0U,
             candidate.gicp_score,
+            best_trial->selection_cost,
             corr_t,
             corr_r_deg
         );
@@ -1309,6 +1653,53 @@ namespace small_dlio {
                 "pgo_odom_info_diag"
             )
         );
+    }
+
+    bool LoopDetectorNode::shouldAddLoopEdgeToPoseGraph(
+        const LoopCandidate &candidate,
+        int &current_gap,
+        double &travel_gap
+    ) const {
+
+        current_gap = std::numeric_limits<int>::max();
+        travel_gap = std::numeric_limits<double>::infinity();
+
+        if (!has_last_added_loop_edge_)
+            return true;
+
+        const int64_t raw_current_gap =
+            static_cast<int64_t>(candidate.current_id) -
+            static_cast<int64_t>(last_added_loop_current_id_);
+        if (raw_current_gap > static_cast<int64_t>(std::numeric_limits<int>::max())) {
+
+            current_gap = std::numeric_limits<int>::max();
+        } else if (raw_current_gap < static_cast<int64_t>(std::numeric_limits<int>::min())) {
+
+            current_gap = std::numeric_limits<int>::min();
+        } else {
+
+            current_gap = static_cast<int>(raw_current_gap);
+        }
+
+        if (loop_edge_min_current_gap_ > 0 &&
+            raw_current_gap >= 0 &&
+            raw_current_gap < loop_edge_min_current_gap_)
+            return false;
+
+        const auto *current = findKeyFrame(candidate.current_id);
+        if (current) {
+
+            travel_gap =
+                current->travel_distance -
+                last_added_loop_current_travel_distance_;
+        }
+
+        if (loop_edge_min_travel_gap_ > 0.0 &&
+            std::isfinite(travel_gap) &&
+            travel_gap < loop_edge_min_travel_gap_)
+            return false;
+
+        return true;
     }
 
     bool LoopDetectorNode::addLoopCandidateToPoseGraph(

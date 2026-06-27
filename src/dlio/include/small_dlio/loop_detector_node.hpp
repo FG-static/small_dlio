@@ -2,6 +2,7 @@
 #define SMALL_DLIO__LOOP_DETECTOR_NODE_HPP
 
 #include "LidarIris.h"
+#include "cart_context.hpp"
 #include "dlio/msg/key_frame.hpp"
 #include "gicp.hpp"
 #include "geometry_msgs/msg/pose.hpp"
@@ -20,6 +21,7 @@
 #include <pcl/point_types.h>
 
 #include <memory>
+#include <limits>
 #include <rclcpp/publisher.hpp>
 #include <string>
 #include <utility>
@@ -44,6 +46,8 @@ namespace small_dlio {
             pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
             cv::Mat1b iris_image;
             LidarIris::FeatureDesc iris_descriptor;
+            CartContext::Descriptor cart_descriptor;
+            bool has_cart_descriptor = false;
         };
 
         // Save potential loop-detection frame
@@ -52,6 +56,10 @@ namespace small_dlio {
             uint32_t current_id = 0;
             uint32_t history_id = 0;
             float iris_distance = 0.0F;
+            float cart_distance = std::numeric_limits<float>::infinity();
+            float fused_distance = std::numeric_limits<float>::infinity();
+            int cart_shift_cols = 0;
+            double cart_lateral_offset_m = 0.0;
             int yaw_bias = 0;
             bool gicp_verified = false;
             double gicp_score = 1e9;
@@ -89,6 +97,10 @@ namespace small_dlio {
         bool computeIrisDescriptor(
             LoopKeyFrame &keyframe
         );
+
+        bool computeCartDescriptor(
+            LoopKeyFrame &keyframe
+        ) const;
 
         bool detectLoopCandidate(
             const LoopKeyFrame &current,
@@ -161,6 +173,12 @@ namespace small_dlio {
             const LoopCandidate &candidate
         );
 
+        bool shouldAddLoopEdgeToPoseGraph(
+            const LoopCandidate &candidate,
+            int &current_gap,
+            double &travel_gap
+        ) const;
+
         double optimizePoseGraphIfNeeded(
             bool has_new_loop
         );
@@ -190,6 +208,7 @@ namespace small_dlio {
             pub_timing_;
 
         std::unique_ptr<LidarIris> lidar_iris_;
+        std::unique_ptr<CartContext> cart_context_;
         GicpMatcher gicp_matcher_;
         PoseGraph pose_graph_;
         std::vector<LoopKeyFrame> keyframes_;
@@ -218,6 +237,8 @@ namespace small_dlio {
         double loop_gicp_score_thresh_ = 1.0;
         double loop_gicp_max_correction_trans_ = 3.0;
         double loop_gicp_max_correction_rot_deg_ = 20.0;
+        double loop_gicp_selection_correction_trans_weight_ = 0.1;
+        double loop_gicp_selection_correction_rot_weight_ = 0.0;
         bool loop_gicp_use_submap_ = false;
         int loop_gicp_submap_keyframes_ = 5;
         double loop_gicp_submap_leaf_size_ = 0.2;
@@ -234,6 +255,8 @@ namespace small_dlio {
         int pgo_max_iterations_ = 20;
         double pgo_odom_edge_weight_ = 100.0;
         double pgo_loop_edge_weight_ = 500.0;
+        int loop_edge_min_current_gap_ = 20;
+        double loop_edge_min_travel_gap_ = 5.0;
         std::vector<double> pgo_odom_info_diag_;
         std::vector<double> pgo_loop_info_diag_;
 
@@ -242,6 +265,20 @@ namespace small_dlio {
         float iris_mult_ = 1.6F;
         float iris_sigma_onf_ = 0.75F;
         int iris_match_num_ = 2;
+
+        bool cart_enable_ = true;
+        double cart_x_unit_m_ = 0.5;
+        double cart_y_unit_m_ = 0.1;
+        double cart_x_max_m_ = 50.0;
+        double cart_y_max_m_ = 25.0;
+        double cart_voxel_leaf_m_ = 0.0;
+        double cart_height_offset_m_ = 0.0;
+        bool cart_use_align_key_ = true;
+        double cart_align_search_ratio_ = 0.04;
+        double cart_weight_ = 0.35;
+        double iris_weight_ = 0.65;
+        int cart_candidate_top_k_ = 10;
+        double loop_fused_distance_thresh_ = 1.0;
 
         uint64_t received_keyframes_ = 0;
         uint64_t stored_keyframes_ = 0;
@@ -252,6 +289,9 @@ namespace small_dlio {
         geometry_msgs::msg::Pose last_accepted_keyframe_pose_;
         rclcpp::Time last_accepted_keyframe_stamp_;
         bool has_last_accepted_keyframe_ = false;
+        uint32_t last_added_loop_current_id_ = 0;
+        double last_added_loop_current_travel_distance_ = 0.0;
+        bool has_last_added_loop_edge_ = false;
         uint32_t next_backend_keyframe_id_ = 0;
     };
 
