@@ -88,6 +88,8 @@ namespace small_dlio {
         std::string body_frame_ = "body";
         std::string lidar_frame_ = "livox_frame";
         bool rebuild_unoptimized_keyframes_with_approximation_ = true;
+        bool apply_pgo_correction_to_unoptimized_keyframes_ = true;
+        int optimized_keyframes_tail_exclusion_count_ = 0;
     };
 } // small_dlio
 

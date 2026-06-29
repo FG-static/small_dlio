@@ -30,6 +30,13 @@ small_dlio_loop_detector:
         0.0,
         1.0,
       ]
+    keyframe_exclusion_box_enable: true
+    keyframe_exclusion_min_x: -3.0
+    keyframe_exclusion_max_x: -0.2
+    keyframe_exclusion_min_y: -1.2
+    keyframe_exclusion_max_y: 1.2
+    keyframe_exclusion_min_z: -0.1
+    keyframe_exclusion_max_z: 2.0
     kf_trans_thresh: 0.5
     kf_rot_thresh: 0.1745
     min_kf_interval_sec: 0.0
@@ -37,9 +44,9 @@ small_dlio_loop_detector:
     loop_enable: true
     loop_min_keyframe_gap: 0
     loop_min_travel_distance: 8.0
-    loop_iris_distance_thresh: 0.3
+    loop_iris_distance_thresh: 0.30
     loop_gicp_enable: true
-    loop_gicp_score_thresh: 0.5
+    loop_gicp_score_thresh: 1.0
     loop_gicp_max_correction_trans: 2.5
     loop_gicp_max_correction_rot_deg: 25.0
     loop_gicp_selection_correction_trans_weight: 0.1
@@ -60,7 +67,14 @@ small_dlio_loop_detector:
     # Information matrix diagonal order: [x, y, z, roll, pitch, yaw].
     # Higher value means stronger trust in that DoF.
     pgo_odom_info_diag: [350.0, 350.0, 150.0, 140.0, 140.0, 400.0]
-    pgo_loop_info_diag: [650.0, 650.0, 250.0, 150.0, 150.0, 850.0]
+    pgo_loop_info_diag: [120.0, 120.0, 80.0, 60.0, 60.0, 150.0]
+    pgo_loop_info_dynamic_enable: true
+    pgo_loop_info_score_ref: 0.5
+    pgo_loop_info_score_floor: 0.05
+    pgo_loop_info_min_scale: 0.2
+    pgo_loop_info_max_scale: 2.0
+    pgo_loop_robust_kernel_enable: true
+    pgo_loop_robust_kernel_delta: 1.0
     iris_nscale: 4
     iris_min_wave_length: 18
     iris_mult: 1.6
@@ -75,10 +89,9 @@ small_dlio_loop_detector:
     cart_height_offset_m: 0.0
     cart_use_align_key: true
     cart_align_search_ratio: 0.04
-    iris_weight: 0.65
-    cart_weight: 0.35
     cart_candidate_top_k: 10
-    loop_fused_distance_thresh: 1.5
+    loop_descriptor_verify_top_k: 5
+    cart_distance_thresh: 0.75
 
 fastlio_keyframe_bridge:
   ros__parameters:

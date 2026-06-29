@@ -57,12 +57,12 @@ namespace small_dlio {
             uint32_t history_id = 0;
             float iris_distance = 0.0F;
             float cart_distance = std::numeric_limits<float>::infinity();
-            float fused_distance = std::numeric_limits<float>::infinity();
             int cart_shift_cols = 0;
             double cart_lateral_offset_m = 0.0;
             int yaw_bias = 0;
             bool gicp_verified = false;
             double gicp_score = 1e9;
+            double gicp_selection_cost = std::numeric_limits<double>::infinity();
             double gicp_correction_trans = 0.0;
             double gicp_correction_rot_deg = 0.0;
             Eigen::Matrix4d source_to_target = Eigen::Matrix4d::Identity();
@@ -79,6 +79,10 @@ namespace small_dlio {
         bool convertKeyFrameMsg(
             const dlio::msg::KeyFrame &msg,
             LoopKeyFrame &keyframe
+        ) const;
+
+        bool filterKeyFrameMsgCloud(
+            dlio::msg::KeyFrame &msg
         ) const;
 
         bool shouldAcceptKeyFrameCandidate(
@@ -110,6 +114,13 @@ namespace small_dlio {
         bool detectLoopCandidate(
             const LoopKeyFrame &current,
             LoopCandidate &candidate,
+            float &best_distance,
+            int &eligible_count
+        ) const;
+
+        bool detectLoopCandidates(
+            const LoopKeyFrame &current,
+            std::vector<LoopCandidate> &candidates,
             float &best_distance,
             int &eligible_count
         ) const;
@@ -249,6 +260,13 @@ namespace small_dlio {
         std::string lidar_frame_ = "livox_frame";
         Eigen::Isometry3d T_body_lidar_ = Eigen::Isometry3d::Identity();
         Eigen::Isometry3d T_lidar_body_ = Eigen::Isometry3d::Identity();
+        bool keyframe_exclusion_box_enable_ = false;
+        double keyframe_exclusion_min_x_ = -3.0;
+        double keyframe_exclusion_max_x_ = -0.2;
+        double keyframe_exclusion_min_y_ = -1.2;
+        double keyframe_exclusion_max_y_ = 1.2;
+        double keyframe_exclusion_min_z_ = -0.5;
+        double keyframe_exclusion_max_z_ = 2.0;
 
         bool pgo_enable_ = false;
         bool pgo_optimize_on_loop_ = true;
@@ -259,6 +277,13 @@ namespace small_dlio {
         double loop_edge_min_travel_gap_ = 5.0;
         std::vector<double> pgo_odom_info_diag_;
         std::vector<double> pgo_loop_info_diag_;
+        bool pgo_loop_info_dynamic_enable_ = true;
+        double pgo_loop_info_score_ref_ = 0.5;
+        double pgo_loop_info_score_floor_ = 0.05;
+        double pgo_loop_info_min_scale_ = 0.2;
+        double pgo_loop_info_max_scale_ = 2.0;
+        bool pgo_loop_robust_kernel_enable_ = true;
+        double pgo_loop_robust_kernel_delta_ = 1.0;
 
         int iris_nscale_ = 4;
         int iris_min_wave_length_ = 18;
@@ -275,10 +300,9 @@ namespace small_dlio {
         double cart_height_offset_m_ = 0.0;
         bool cart_use_align_key_ = true;
         double cart_align_search_ratio_ = 0.04;
-        double cart_weight_ = 0.35;
-        double iris_weight_ = 0.65;
         int cart_candidate_top_k_ = 10;
-        double loop_fused_distance_thresh_ = 1.0;
+        int loop_descriptor_verify_top_k_ = 5;
+        double cart_distance_thresh_ = 0.65;
 
         uint64_t received_keyframes_ = 0;
         uint64_t stored_keyframes_ = 0;

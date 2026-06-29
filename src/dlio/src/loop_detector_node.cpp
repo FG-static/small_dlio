@@ -36,6 +36,8 @@ namespace small_dlio {
 
         loadParams();
 
+        // 初始化描述子、GICP 和 PGO 后端。后续 callbackKeyFrame()
+        // 只负责按关键帧流推进 LCD -> GICP -> PGO 的数据流。
         lidar_iris_ = std::make_unique<LidarIris>(
             iris_nscale_,
             iris_min_wave_length_,
@@ -133,6 +135,8 @@ namespace small_dlio {
 
     void LoopDetectorNode::loadParams() {
 
+        // 参数分三类：关键帧筛选/LCD/GICP、PGO、描述子与可视化输出。
+        // 这里先声明默认值，再统一读取，最后做范围修正。
         declare_parameter("keyframe_topic", keyframe_topic_);
         declare_parameter("filtered_keyframe_topic", filtered_keyframe_topic_);
         declare_parameter("marker_topic", marker_topic_);
@@ -171,6 +175,13 @@ namespace small_dlio {
             loop_gicp_max_correspondence_distance_);
         declare_parameter("body_frame", body_frame_);
         declare_parameter("lidar_frame", lidar_frame_);
+        declare_parameter("keyframe_exclusion_box_enable", keyframe_exclusion_box_enable_);
+        declare_parameter("keyframe_exclusion_min_x", keyframe_exclusion_min_x_);
+        declare_parameter("keyframe_exclusion_max_x", keyframe_exclusion_max_x_);
+        declare_parameter("keyframe_exclusion_min_y", keyframe_exclusion_min_y_);
+        declare_parameter("keyframe_exclusion_max_y", keyframe_exclusion_max_y_);
+        declare_parameter("keyframe_exclusion_min_z", keyframe_exclusion_min_z_);
+        declare_parameter("keyframe_exclusion_max_z", keyframe_exclusion_max_z_);
         declare_parameter("pgo_enable", pgo_enable_);
         declare_parameter("pgo_optimize_on_loop", pgo_optimize_on_loop_);
         declare_parameter("pgo_max_iterations", pgo_max_iterations_);
@@ -180,6 +191,25 @@ namespace small_dlio {
         declare_parameter("loop_edge_min_travel_gap", loop_edge_min_travel_gap_);
         declare_parameter("pgo_odom_info_diag", std::vector<double>{});
         declare_parameter("pgo_loop_info_diag", std::vector<double>{});
+        declare_parameter(
+            "pgo_loop_info_dynamic_enable",
+            pgo_loop_info_dynamic_enable_
+        );
+        declare_parameter("pgo_loop_info_score_ref", pgo_loop_info_score_ref_);
+        declare_parameter(
+            "pgo_loop_info_score_floor",
+            pgo_loop_info_score_floor_
+        );
+        declare_parameter("pgo_loop_info_min_scale", pgo_loop_info_min_scale_);
+        declare_parameter("pgo_loop_info_max_scale", pgo_loop_info_max_scale_);
+        declare_parameter(
+            "pgo_loop_robust_kernel_enable",
+            pgo_loop_robust_kernel_enable_
+        );
+        declare_parameter(
+            "pgo_loop_robust_kernel_delta",
+            pgo_loop_robust_kernel_delta_
+        );
         declare_parameter("iris_nscale", iris_nscale_);
         declare_parameter("iris_min_wave_length", iris_min_wave_length_);
         declare_parameter("iris_mult", iris_mult_);
@@ -194,10 +224,9 @@ namespace small_dlio {
         declare_parameter("cart_height_offset_m", cart_height_offset_m_);
         declare_parameter("cart_use_align_key", cart_use_align_key_);
         declare_parameter("cart_align_search_ratio", cart_align_search_ratio_);
-        declare_parameter("cart_weight", cart_weight_);
-        declare_parameter("iris_weight", iris_weight_);
         declare_parameter("cart_candidate_top_k", cart_candidate_top_k_);
-        declare_parameter("loop_fused_distance_thresh", loop_fused_distance_thresh_);
+        declare_parameter("loop_descriptor_verify_top_k", loop_descriptor_verify_top_k_);
+        declare_parameter("cart_distance_thresh", cart_distance_thresh_);
         declare_parameter("optimized_keyframes_topic", optimized_keyframes_topic_);
 
         get_parameter("keyframe_topic", keyframe_topic_);
@@ -238,6 +267,13 @@ namespace small_dlio {
             loop_gicp_max_correspondence_distance_);
         get_parameter("body_frame", body_frame_);
         get_parameter("lidar_frame", lidar_frame_);
+        get_parameter("keyframe_exclusion_box_enable", keyframe_exclusion_box_enable_);
+        get_parameter("keyframe_exclusion_min_x", keyframe_exclusion_min_x_);
+        get_parameter("keyframe_exclusion_max_x", keyframe_exclusion_max_x_);
+        get_parameter("keyframe_exclusion_min_y", keyframe_exclusion_min_y_);
+        get_parameter("keyframe_exclusion_max_y", keyframe_exclusion_max_y_);
+        get_parameter("keyframe_exclusion_min_z", keyframe_exclusion_min_z_);
+        get_parameter("keyframe_exclusion_max_z", keyframe_exclusion_max_z_);
         get_parameter("pgo_enable", pgo_enable_);
         get_parameter("pgo_optimize_on_loop", pgo_optimize_on_loop_);
         get_parameter("pgo_max_iterations", pgo_max_iterations_);
@@ -247,6 +283,25 @@ namespace small_dlio {
         get_parameter("loop_edge_min_travel_gap", loop_edge_min_travel_gap_);
         get_parameter("pgo_odom_info_diag", pgo_odom_info_diag_);
         get_parameter("pgo_loop_info_diag", pgo_loop_info_diag_);
+        get_parameter(
+            "pgo_loop_info_dynamic_enable",
+            pgo_loop_info_dynamic_enable_
+        );
+        get_parameter("pgo_loop_info_score_ref", pgo_loop_info_score_ref_);
+        get_parameter(
+            "pgo_loop_info_score_floor",
+            pgo_loop_info_score_floor_
+        );
+        get_parameter("pgo_loop_info_min_scale", pgo_loop_info_min_scale_);
+        get_parameter("pgo_loop_info_max_scale", pgo_loop_info_max_scale_);
+        get_parameter(
+            "pgo_loop_robust_kernel_enable",
+            pgo_loop_robust_kernel_enable_
+        );
+        get_parameter(
+            "pgo_loop_robust_kernel_delta",
+            pgo_loop_robust_kernel_delta_
+        );
         get_parameter("iris_nscale", iris_nscale_);
         get_parameter("iris_min_wave_length", iris_min_wave_length_);
         get_parameter("iris_mult", iris_mult_);
@@ -261,12 +316,13 @@ namespace small_dlio {
         get_parameter("cart_height_offset_m", cart_height_offset_m_);
         get_parameter("cart_use_align_key", cart_use_align_key_);
         get_parameter("cart_align_search_ratio", cart_align_search_ratio_);
-        get_parameter("cart_weight", cart_weight_);
-        get_parameter("iris_weight", iris_weight_);
         get_parameter("cart_candidate_top_k", cart_candidate_top_k_);
-        get_parameter("loop_fused_distance_thresh", loop_fused_distance_thresh_);
+        get_parameter("loop_descriptor_verify_top_k", loop_descriptor_verify_top_k_);
+        get_parameter("cart_distance_thresh", cart_distance_thresh_);
         get_parameter("optimized_keyframes_topic", optimized_keyframes_topic_);
 
+        // 对会直接影响运行稳定性的参数做兜底，避免非法配置让
+        // GICP、Cart Context 或 PGO 在运行中崩掉。
         if (loop_gicp_submap_keyframes_ < 1)
             loop_gicp_submap_keyframes_ = 1;
         if (!std::isfinite(loop_gicp_submap_leaf_size_) ||
@@ -291,24 +347,59 @@ namespace small_dlio {
         if (!std::isfinite(cart_align_search_ratio_) ||
             cart_align_search_ratio_ <= 0.0)
             cart_align_search_ratio_ = 1.0;
-        if (!std::isfinite(cart_weight_) || cart_weight_ < 0.0)
-            cart_weight_ = 0.0;
-        if (!std::isfinite(iris_weight_) || iris_weight_ < 0.0)
-            iris_weight_ = 1.0;
-        if (cart_weight_ <= 0.0)
-            cart_enable_ = false;
         if (cart_candidate_top_k_ < 1)
             cart_candidate_top_k_ = 1;
-        if (!std::isfinite(loop_fused_distance_thresh_) ||
-            loop_fused_distance_thresh_ <= 0.0)
-            loop_fused_distance_thresh_ = 1.0;
+        if (loop_descriptor_verify_top_k_ < 1)
+            loop_descriptor_verify_top_k_ = 1;
+        loop_descriptor_verify_top_k_ =
+            std::min(loop_descriptor_verify_top_k_, cart_candidate_top_k_);
+        if (!std::isfinite(cart_distance_thresh_) ||
+            cart_distance_thresh_ <= 0.0)
+            cart_distance_thresh_ = std::numeric_limits<double>::infinity();
         if (loop_edge_min_current_gap_ < 0)
             loop_edge_min_current_gap_ = 0;
         if (!std::isfinite(loop_edge_min_travel_gap_) ||
             loop_edge_min_travel_gap_ < 0.0)
             loop_edge_min_travel_gap_ = 0.0;
+        if (!std::isfinite(pgo_loop_info_score_ref_) ||
+            pgo_loop_info_score_ref_ <= 0.0)
+            pgo_loop_info_score_ref_ = 0.5;
+        if (!std::isfinite(pgo_loop_info_score_floor_) ||
+            pgo_loop_info_score_floor_ <= 0.0)
+            pgo_loop_info_score_floor_ = 0.05;
+        if (!std::isfinite(pgo_loop_info_min_scale_) ||
+            pgo_loop_info_min_scale_ <= 0.0)
+            pgo_loop_info_min_scale_ = 0.2;
+        if (!std::isfinite(pgo_loop_info_max_scale_) ||
+            pgo_loop_info_max_scale_ <= 0.0)
+            pgo_loop_info_max_scale_ = 2.0;
+        if (pgo_loop_info_min_scale_ > pgo_loop_info_max_scale_)
+            std::swap(pgo_loop_info_min_scale_, pgo_loop_info_max_scale_);
+        if (!std::isfinite(pgo_loop_robust_kernel_delta_) ||
+            pgo_loop_robust_kernel_delta_ <= 0.0)
+            pgo_loop_robust_kernel_delta_ = 1.0;
+        const bool exclusion_box_valid =
+            std::isfinite(keyframe_exclusion_min_x_) &&
+            std::isfinite(keyframe_exclusion_max_x_) &&
+            std::isfinite(keyframe_exclusion_min_y_) &&
+            std::isfinite(keyframe_exclusion_max_y_) &&
+            std::isfinite(keyframe_exclusion_min_z_) &&
+            std::isfinite(keyframe_exclusion_max_z_) &&
+            keyframe_exclusion_min_x_ <= keyframe_exclusion_max_x_ &&
+            keyframe_exclusion_min_y_ <= keyframe_exclusion_max_y_ &&
+            keyframe_exclusion_min_z_ <= keyframe_exclusion_max_z_;
+        if (keyframe_exclusion_box_enable_ && !exclusion_box_valid) {
+
+            RCLCPP_WARN(
+                get_logger(),
+                "keyframe exclusion box is invalid; disabling cloud exclusion"
+            );
+            keyframe_exclusion_box_enable_ = false;
+        }
 
         auto read_body_lidar_extrinsic = [this]() {
+
+            // 兼容两种外参写法：t/q 或完整 4x4 矩阵；矩阵优先级更高。
             const std::vector<double> t_default = {0.0, 0.0, 0.0};
             const std::vector<double> q_default = {1.0, 0.0, 0.0, 0.0};
             std::vector<double> t, q, matrix;
@@ -323,6 +414,7 @@ namespace small_dlio {
             Eigen::Vector3d translation = Eigen::Vector3d::Zero();
             Eigen::Quaterniond rotation = Eigen::Quaterniond::Identity();
 
+            // check
             if (t.size() == 3) {
                 translation = Eigen::Vector3d(t[0], t[1], t[2]);
             } else {
@@ -382,6 +474,7 @@ namespace small_dlio {
                 rotation.normalize();
             }
 
+            // write
             T_body_lidar_ = Eigen::Isometry3d::Identity();
             T_body_lidar_.linear() = rotation.toRotationMatrix();
             T_body_lidar_.translation() = translation;
@@ -418,6 +511,18 @@ namespace small_dlio {
         );
         RCLCPP_INFO(
             get_logger(),
+            "PGO loop weighting: dynamic=%d score_ref=%.3f score_floor=%.3f "
+            "scale=[%.3f %.3f] robust_kernel=%d robust_delta=%.3f",
+            pgo_loop_info_dynamic_enable_ ? 1 : 0,
+            pgo_loop_info_score_ref_,
+            pgo_loop_info_score_floor_,
+            pgo_loop_info_min_scale_,
+            pgo_loop_info_max_scale_,
+            pgo_loop_robust_kernel_enable_ ? 1 : 0,
+            pgo_loop_robust_kernel_delta_
+        );
+        RCLCPP_INFO(
+            get_logger(),
             "Loop GICP submap: enabled=%d keyframes=%d leaf=%.3f",
             loop_gicp_use_submap_ ? 1 : 0,
             loop_gicp_submap_keyframes_,
@@ -438,8 +543,8 @@ namespace small_dlio {
         RCLCPP_INFO(
             get_logger(),
             "Cart Context: enabled=%d unit=[%.3f %.3f] range=[%.1f %.1f] "
-            "voxel=%.3f align_key=%d align_ratio=%.3f weights=[iris %.3f cart %.3f] "
-            "top_k=%d fused_thresh=%.3f",
+            "voxel=%.3f align_key=%d align_ratio=%.3f "
+            "iris_top_k=%d verify_top_k=%d cart_thresh=%.3f",
             cart_enable_ ? 1 : 0,
             cart_x_unit_m_,
             cart_y_unit_m_,
@@ -448,10 +553,20 @@ namespace small_dlio {
             cart_voxel_leaf_m_,
             cart_use_align_key_ ? 1 : 0,
             cart_align_search_ratio_,
-            iris_weight_,
-            cart_weight_,
             cart_candidate_top_k_,
-            loop_fused_distance_thresh_
+            loop_descriptor_verify_top_k_,
+            cart_distance_thresh_
+        );
+        RCLCPP_INFO(
+            get_logger(),
+            "Keyframe exclusion box: enabled=%d x=[%.3f %.3f] y=[%.3f %.3f] z=[%.3f %.3f]",
+            keyframe_exclusion_box_enable_ ? 1 : 0,
+            keyframe_exclusion_min_x_,
+            keyframe_exclusion_max_x_,
+            keyframe_exclusion_min_y_,
+            keyframe_exclusion_max_y_,
+            keyframe_exclusion_min_z_,
+            keyframe_exclusion_max_z_
         );
     }
 
@@ -464,6 +579,7 @@ namespace small_dlio {
         if (!msg) return;
         ++ received_keyframes_;
 
+        // 1. 先做关键帧门控：位移/角度/时间间隔/点数不足的候选不进入后端。
         if (!shouldAcceptKeyFrameCandidate(*msg)) {
 
             RCLCPP_INFO_THROTTLE(
@@ -479,6 +595,17 @@ namespace small_dlio {
         accepted_msg.id = next_backend_keyframe_id_;
         const rclcpp::Time timing_stamp(accepted_msg.header.stamp);
 
+        // 2. 可选地裁掉指定空间盒内的点，再转换成后端内部 LoopKeyFrame。
+        if (!filterKeyFrameMsgCloud(accepted_msg)) {
+
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "Rejected keyframe after exclusion-box filtering: id=%u",
+                accepted_msg.id
+            );
+            return;
+        }
+
         LoopKeyFrame keyframe;
         if (!convertKeyFrameMsg(accepted_msg, keyframe)) {
 
@@ -490,6 +617,8 @@ namespace small_dlio {
             return;
         }
 
+        // 3. 为当前关键帧计算 LiDAR-Iris 和 Cart Context。描述子失败时，
+        // 当前帧不会进入回环库，也不会作为 PGO 节点。
         const auto descriptor_start = SteadyClock::now();
         if (!computeIrisDescriptor(keyframe)) {
 
@@ -541,6 +670,8 @@ namespace small_dlio {
         const bool pgo_node_added =
             pgo_enable_ && addKeyFrameToPoseGraph(keyframe);
 
+        // 4. LCD 先按描述子选出候选，再用 GICP 验证，最后只保留
+        // 选择代价最低的一个候选进入 loop edge 阶段。
         bool added_loop_edge = false;
         LoopCandidate accepted_candidate;
         bool has_accepted_candidate = false;
@@ -548,51 +679,75 @@ namespace small_dlio {
         if (loop_enable_) {
 
             const auto loop_start = SteadyClock::now();
-            LoopCandidate candidate;
+            std::vector<LoopCandidate> candidates;
             float best_distance = std::numeric_limits<float>::infinity();
             int eligible_count = 0;
-            if (detectLoopCandidate(
-                    keyframe, candidate, best_distance, eligible_count)) {
+            if (detectLoopCandidates(
+                    keyframe, candidates, best_distance, eligible_count)) {
 
-                if (!loop_gicp_enable_ ||
-                    verifyLoopCandidateByGicp(keyframe, candidate)) {
+                size_t verified_count = 0U;
+                for (auto &candidate : candidates) {
+
+                    const bool verified =
+                        !loop_gicp_enable_ ||
+                        verifyLoopCandidateByGicp(keyframe, candidate);
+                    if (!verified)
+                        continue;
+                    ++ verified_count;
+
+                    if (!has_accepted_candidate ||
+                        candidate.gicp_selection_cost <
+                            accepted_candidate.gicp_selection_cost ||
+                        (!std::isfinite(accepted_candidate.gicp_selection_cost) &&
+                         candidate.gicp_score < accepted_candidate.gicp_score)) {
+
+                        accepted_candidate = candidate;
+                        has_accepted_candidate = true;
+                    }
+                }
+
+                if (has_accepted_candidate) {
 
                     ++ candidate_hits_;
-                    accepted_candidate = candidate;
-                    has_accepted_candidate = true;
                     RCLCPP_INFO(
                         get_logger(),
-                        "Loop candidate: current=%u history=%u iris=%.4f "
-                        "cart=%.4f fused=%.4f cart_shift=%d cart_lat=%.3f "
-                        "yaw_bias=%d gicp_enable=%d gicp_score=%.4f "
-                        "corr_t=%.3f corr_r=%.2f",
-                        candidate.current_id,
-                        candidate.history_id,
-                        candidate.iris_distance,
-                        candidate.cart_distance,
-                        candidate.fused_distance,
-                        candidate.cart_shift_cols,
-                        candidate.cart_lateral_offset_m,
-                        candidate.yaw_bias,
+                        "Loop candidate selected: current=%u history=%u iris=%.4f "
+                        "cart=%.4f cart_shift=%d cart_lat=%.3f "
+                        "yaw_bias=%d gicp_enable=%d gicp_score=%.4f cost=%.4f "
+                        "corr_t=%.3f corr_r=%.2f descriptor_candidates=%zu "
+                        "gicp_verified=%zu",
+                        accepted_candidate.current_id,
+                        accepted_candidate.history_id,
+                        accepted_candidate.iris_distance,
+                        accepted_candidate.cart_distance,
+                        accepted_candidate.cart_shift_cols,
+                        accepted_candidate.cart_lateral_offset_m,
+                        accepted_candidate.yaw_bias,
                         loop_gicp_enable_ ? 1 : 0,
-                        candidate.gicp_score,
-                        candidate.gicp_correction_trans,
-                        candidate.gicp_correction_rot_deg
+                        accepted_candidate.gicp_score,
+                        accepted_candidate.gicp_selection_cost,
+                        accepted_candidate.gicp_correction_trans,
+                        accepted_candidate.gicp_correction_rot_deg,
+                        candidates.size(),
+                        verified_count
                     );
+                } else {
+
+                    ++ candidate_misses_;
                 }
             } else {
 
                 ++ candidate_misses_;
                 RCLCPP_INFO_THROTTLE(
                     get_logger(), *get_clock(), 2000,
-                    "Loop candidate miss: current=%u eligible=%d best_score=%.4f "
-                    "iris_thresh=%.4f fused_thresh=%.4f stored=%zu received=%lu iris_fail=%lu "
+                    "Loop candidate miss: current=%u eligible=%d best_iris=%.4f "
+                    "iris_thresh=%.4f cart_thresh=%.4f stored=%zu received=%lu iris_fail=%lu "
                     "hits=%lu misses=%lu",
                     keyframe.id,
                     eligible_count,
                     best_distance,
                     loop_iris_distance_thresh_,
-                    loop_fused_distance_thresh_,
+                    cart_distance_thresh_,
                     keyframes_.size(),
                     received_keyframes_,
                     iris_failures_,
@@ -604,6 +759,7 @@ namespace small_dlio {
         }
         const double lcd_ms = descriptor_ms + loop_detect_ms;
 
+        // 5. 当前关键帧在检测结束后才入库，避免本帧参与自己的历史候选搜索。
         storeKeyFrame(std::move(keyframe));
         ++ stored_keyframes_;
 
@@ -612,12 +768,17 @@ namespace small_dlio {
             loop_candidates_.push_back(accepted_candidate);
             if (pgo_node_added && pgo_enable_) {
 
+                // 6. 对已经通过 GICP 的候选再做稀疏化，避免同一片区域
+                // 连续添加大量相似 loop edge。
                 int current_gap = 0;
                 double travel_gap = 0.0;
+                // 使用帧间距离/ keyframe 数量决定是否添加该 loop edge
                 if (shouldAddLoopEdgeToPoseGraph(
                         accepted_candidate,
                         current_gap,
-                        travel_gap)) {
+                        travel_gap
+                    )
+                ) {
 
                     added_loop_edge =
                         addLoopCandidateToPoseGraph(accepted_candidate);
@@ -649,6 +810,8 @@ namespace small_dlio {
             }
         }
 
+        // 7. PGO 默认只在新增 loop edge 后触发；优化结果随后发布给
+        // path 和 map_node 重建使用。
         double pgo_ms = 0.0;
         if (pgo_enable_)
             pgo_ms = optimizePoseGraphIfNeeded(added_loop_edge);
@@ -785,6 +948,95 @@ namespace small_dlio {
             delta.second >= kf_rot_thresh_;
     }
 
+    bool LoopDetectorNode::filterKeyFrameMsgCloud(
+        dlio::msg::KeyFrame &msg
+    ) const {
+
+        if (!keyframe_exclusion_box_enable_)
+            return true;
+
+        auto cloud_in = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        pcl::fromROSMsg(msg.cloud, *cloud_in);
+        if (cloud_in->empty())
+            return false;
+
+        auto cloud_body = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        const std::string &frame_id = msg.cloud.header.frame_id;
+        if (frame_id == lidar_frame_) {
+
+            pcl::transformPointCloud(
+                *cloud_in,
+                *cloud_body,
+                T_body_lidar_.matrix().cast<float>()
+            );
+        } else {
+
+            if (!frame_id.empty() && frame_id != body_frame_) {
+
+                RCLCPP_WARN_THROTTLE(
+                    get_logger(), *get_clock(), 2000,
+                    "Keyframe exclusion input frame '%s' is neither '%s' nor '%s'; treating it as body frame",
+                    frame_id.c_str(),
+                    body_frame_.c_str(),
+                    lidar_frame_.c_str()
+                );
+            }
+            cloud_body = cloud_in;
+        }
+
+        auto filtered = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        filtered->reserve(cloud_body->size());
+        for (const auto &point : cloud_body->points) {
+
+            if (!std::isfinite(point.x) ||
+                !std::isfinite(point.y) ||
+                !std::isfinite(point.z))
+                continue;
+
+            const bool inside_box =
+                point.x >= keyframe_exclusion_min_x_ &&
+                point.x <= keyframe_exclusion_max_x_ &&
+                point.y >= keyframe_exclusion_min_y_ &&
+                point.y <= keyframe_exclusion_max_y_ &&
+                point.z >= keyframe_exclusion_min_z_ &&
+                point.z <= keyframe_exclusion_max_z_;
+            if (!inside_box)
+                filtered->push_back(point);
+        }
+
+        filtered->width = static_cast<uint32_t>(filtered->size());
+        filtered->height = 1;
+        filtered->is_dense = false;
+        if (filtered->size() < static_cast<size_t>(min_cloud_points_))
+            return false;
+
+        sensor_msgs::msg::PointCloud2 filtered_msg;
+        pcl::toROSMsg(*filtered, filtered_msg);
+        filtered_msg.header = msg.cloud.header;
+        filtered_msg.header.frame_id = body_frame_;
+        msg.cloud = std::move(filtered_msg);
+
+        const size_t removed = cloud_body->size() - filtered->size();
+        if (removed > 0U) {
+
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "Keyframe exclusion box removed %zu/%zu points: id=%u box x=[%.2f %.2f] y=[%.2f %.2f] z=[%.2f %.2f]",
+                removed,
+                cloud_body->size(),
+                msg.id,
+                keyframe_exclusion_min_x_,
+                keyframe_exclusion_max_x_,
+                keyframe_exclusion_min_y_,
+                keyframe_exclusion_max_y_,
+                keyframe_exclusion_min_z_,
+                keyframe_exclusion_max_z_
+            );
+        }
+
+        return true;
+    }
+
     bool LoopDetectorNode::convertKeyFrameMsg(
         const dlio::msg::KeyFrame &msg,
         LoopKeyFrame &keyframe
@@ -872,8 +1124,7 @@ namespace small_dlio {
 
         float best_distance = std::numeric_limits<float>::infinity();
         int eligible_count = 0;
-        return detectLoopCandidate(
-            current, candidate, best_distance, eligible_count);
+        return detectLoopCandidate(current, candidate, best_distance, eligible_count);
     }
 
     bool LoopDetectorNode::detectLoopCandidate(
@@ -883,6 +1134,24 @@ namespace small_dlio {
         int &eligible_count
     ) const {
 
+        std::vector<LoopCandidate> candidates;
+        if (!detectLoopCandidates(
+                current, candidates, best_distance, eligible_count) ||
+            candidates.empty())
+            return false;
+
+        candidate = candidates.front();
+        return true;
+    }
+
+    bool LoopDetectorNode::detectLoopCandidates(
+        const LoopKeyFrame &current,
+        std::vector<LoopCandidate> &candidates,
+        float &best_distance,
+        int &eligible_count
+    ) const {
+
+        candidates.clear();
         best_distance = std::numeric_limits<float>::infinity();
         eligible_count = 0;
 
@@ -896,7 +1165,9 @@ namespace small_dlio {
         std::vector<IrisHit> iris_hits;
         iris_hits.reserve(static_cast<size_t>(cart_candidate_top_k_));
 
-        // O(N * C) kNN search, it will be exchange in the future
+        // 第一阶段：遍历历史关键帧，用 LiDAR-Iris 做粗召回。
+        // min keyframe gap 和 travel distance 在 isCandidateAllowed() 中过滤。
+        // O(N * C) kNN search, it will be exchange in the future.
         for (const auto &history : keyframes_) {
 
             if (!isCandidateAllowed(current, history))
@@ -913,40 +1184,53 @@ namespace small_dlio {
             if (!std::isfinite(dis))
                 continue;
 
+            if (dis < best_distance)
+                best_distance = dis;
+
             if (dis >= loop_iris_distance_thresh_)
                 continue;
 
             iris_hits.push_back(IrisHit{&history, dis, yaw_bias});
-            std::sort(
-                iris_hits.begin(),
-                iris_hits.end(),
-                [](const IrisHit &a, const IrisHit &b) {
-                    return a.iris_distance < b.iris_distance;
-                }
-            );
-            if (static_cast<int>(iris_hits.size()) > cart_candidate_top_k_)
-                iris_hits.pop_back();
         }
 
-        bool found = false;
-        LoopCandidate best_candidate;
+        std::sort(
+            iris_hits.begin(),
+            iris_hits.end(),
+            [](const IrisHit &a, const IrisHit &b) {
+                return a.iris_distance < b.iris_distance;
+            }
+        );
+        if (static_cast<int>(iris_hits.size()) > cart_candidate_top_k_) {
 
+            iris_hits.resize(static_cast<size_t>(cart_candidate_top_k_));
+        }
+
+        std::ostringstream cart_debug_stream;
+        int cart_debug_rank = 0;
         for (const IrisHit &hit : iris_hits) {
 
+            // 第二阶段：可选 Cart Context 复核。它提供距离、yaw shift
+            // 和横向偏移提示，后续 GICP 会用这些提示扩展初值。
             if (!hit.history)
                 continue;
 
-            float cart_distance = 0.0F;
+            float cart_distance = std::numeric_limits<float>::infinity();
             int cart_shift_cols = 0;
             double cart_lateral_offset_m = 0.0;
-            float fused_distance = hit.iris_distance;
 
             if (cart_enable_) {
 
                 if (!cart_context_ ||
                     !current.has_cart_descriptor ||
-                    !hit.history->has_cart_descriptor)
+                    !hit.history->has_cart_descriptor) {
+
+                    cart_debug_stream
+                        << "#" << cart_debug_rank++
+                        << " id=" << hit.history->id
+                        << " iris=" << hit.iris_distance
+                        << " cart=nan valid=0 pass=0 ";
                     continue;
+                }
 
                 const CartContext::MatchResult cart_result =
                     cart_context_->compare(
@@ -954,41 +1238,84 @@ namespace small_dlio {
                         hit.history->cart_descriptor
                     );
                 if (!cart_result.valid ||
-                    !std::isfinite(cart_result.distance))
+                    !std::isfinite(cart_result.distance)) {
+
+                    cart_debug_stream
+                        << "#" << cart_debug_rank++
+                        << " id=" << hit.history->id
+                        << " iris=" << hit.iris_distance
+                        << " cart=nan valid=0 pass=0 ";
                     continue;
+                }
 
                 cart_distance = cart_result.distance;
                 cart_shift_cols = cart_result.shift_cols;
                 cart_lateral_offset_m = cart_result.lateral_offset_m;
-                fused_distance =
-                    static_cast<float>(
-                        iris_weight_ * hit.iris_distance +
-                        cart_weight_ * cart_distance
-                    );
+                const bool cart_pass = cart_distance <= cart_distance_thresh_;
+                cart_debug_stream
+                    << "#" << cart_debug_rank++
+                    << " id=" << hit.history->id
+                    << " iris=" << hit.iris_distance
+                    << " cart=" << cart_distance
+                    << " shift=" << cart_shift_cols
+                    << " lat=" << cart_lateral_offset_m
+                    << " valid=1 pass=" << (cart_pass ? 1 : 0) << " ";
+                if (!cart_pass)
+                    continue;
             }
 
-            if (!std::isfinite(fused_distance))
-                continue;
-
-            if (fused_distance < best_distance) {
-
-                best_distance = fused_distance;
-                best_candidate.current_id = current.id;
-                best_candidate.history_id = hit.history->id;
-                best_candidate.iris_distance = hit.iris_distance;
-                best_candidate.cart_distance = cart_distance;
-                best_candidate.fused_distance = fused_distance;
-                best_candidate.cart_shift_cols = cart_shift_cols;
-                best_candidate.cart_lateral_offset_m = cart_lateral_offset_m;
-                best_candidate.yaw_bias = hit.yaw_bias;
-                found = true;
-            }
+            LoopCandidate candidate;
+            candidate.current_id = current.id;
+            candidate.history_id = hit.history->id;
+            candidate.iris_distance = hit.iris_distance;
+            candidate.cart_distance = cart_distance;
+            candidate.cart_shift_cols = cart_shift_cols;
+            candidate.cart_lateral_offset_m = cart_lateral_offset_m;
+            candidate.yaw_bias = hit.yaw_bias;
+            candidates.push_back(candidate);
         }
 
-        if (!found || best_distance >= loop_fused_distance_thresh_)
+        if (cart_enable_ && !iris_hits.empty()) {
+
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "Loop descriptor top-k: current=%u iris_hits=%zu cart_candidates=%zu "
+                "cart_thresh=%.4f [%s]",
+                current.id,
+                iris_hits.size(),
+                candidates.size(),
+                cart_distance_thresh_,
+                cart_debug_stream.str().c_str()
+            );
+        }
+
+        if (candidates.empty())
             return false;
 
-        candidate = best_candidate;
+        // 第三阶段：按 Cart/iris 分数排序，只把 top-k 送去 GICP，
+        // 控制每帧后端计算量。
+        std::sort(
+            candidates.begin(),
+            candidates.end(),
+            [this](const LoopCandidate &a, const LoopCandidate &b) {
+                if (cart_enable_) {
+
+                    const bool a_cart = std::isfinite(a.cart_distance);
+                    const bool b_cart = std::isfinite(b.cart_distance);
+                    if (a_cart != b_cart)
+                        return a_cart;
+                    if (a_cart &&
+                        std::abs(a.cart_distance - b.cart_distance) > 1e-4F)
+                        return a.cart_distance < b.cart_distance;
+                }
+                if (std::abs(a.iris_distance - b.iris_distance) > 1e-4F)
+                    return a.iris_distance < b.iris_distance;
+                return a.history_id < b.history_id;
+            }
+        );
+        if (static_cast<int>(candidates.size()) > loop_descriptor_verify_top_k_)
+            candidates.resize(static_cast<size_t>(loop_descriptor_verify_top_k_));
+
         return true;
     }
 
@@ -1036,6 +1363,8 @@ namespace small_dlio {
         const LoopKeyFrame &anchor
     ) const {
 
+        // 以 anchor 的 lidar 坐标系为局部坐标，累积 anchor 及其前序关键帧。
+        // 这样 loop 验证可以使用局部子图，而不是单帧稀疏点云。
         auto submap = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
         const int max_frames = std::max(1, loop_gicp_submap_keyframes_);
 
@@ -1073,6 +1402,7 @@ namespace small_dlio {
 
         if (loop_gicp_submap_leaf_size_ > 0.0) {
 
+            // 子图过密时先降采样，降低 GICP 计算量并稳定配准耗时。
             pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
             voxel_filter.setLeafSize(
                 static_cast<float>(loop_gicp_submap_leaf_size_),
@@ -1102,6 +1432,8 @@ namespace small_dlio {
         LoopCandidate &candidate
     ) {
 
+        // GICP 验证的目标是把描述子候选变成可用于 PGO 的 SE3 测量：
+        // current 点云作为 source，history 点云作为 target，输出 history<-current。
         const auto *history = findKeyFrame(candidate.history_id);
         if (!history || !current.cloud || current.cloud->empty() ||
             !history->cloud || history->cloud->empty())
@@ -1178,6 +1510,7 @@ namespace small_dlio {
         if (!lidar_history_from_current.matrix().allFinite())
             return false;
 
+        // 可选使用关键帧子图替代单帧点云，提高闭环配准的约束密度。
         pcl::PointCloud<pcl::PointXYZ>::Ptr source_cloud = current.cloud;
         pcl::PointCloud<pcl::PointXYZ>::Ptr target_cloud = history->cloud;
         if (loop_gicp_use_submap_) {
@@ -1209,6 +1542,8 @@ namespace small_dlio {
         const Eigen::Matrix4d init_iris_neg =
             make_yaw_delta_init(init_guess, -iris_yaw);
 
+        // 每个 trial 是一次不同初值下的 GICP。最终按 score 和
+        // 相对里程计初值的修正幅度共同选最可信的 trial。
         struct GicpTrial {
 
             std::string label;
@@ -1254,6 +1589,8 @@ namespace small_dlio {
         init_guesses.push_back({"iris+", init_iris_pos});
         init_guesses.push_back({"iris-", init_iris_neg});
 
+        // Cart Context 如果估计了横向偏移，就组合进 GICP 初值搜索，
+        // 增加窄通道/平行结构场景下配准收敛的机会。
         const bool has_cart_lateral =
             cart_enable_ &&
             std::isfinite(candidate.cart_lateral_offset_m) &&
@@ -1291,6 +1628,8 @@ namespace small_dlio {
         trials.reserve(init_guesses.size());
         for (const auto &init : init_guesses) {
 
+            // align() 返回的 transform 是最终 source->target 测量；
+            // correction_delta 用来判断本次配准是否偏离初值过大。
             const GicpResult result =
                 gicp_matcher_.align(source_cloud, target_cloud, init.transform);
             const auto corr = result.success
@@ -1344,17 +1683,16 @@ namespace small_dlio {
 
         RCLCPP_INFO(
             get_logger(),
-            "Loop init debug: current=%u history=%u iris=%.4f cart=%.4f "
-            "fused=%.4f cart_shift=%d cart_lat=%.3f yaw_bias=%d "
-            "submap=%d points=[%zu %zu] "
-            "odom_yaw=%.2f iris_yaw+=%.2f iris_yaw-=%.2f "
-            "score=[%s] cost=[%s] corr_t=[%s] corr_r=[%s] "
-            "odom_delta_t=[%s] odom_delta_r=[%s] accepted=[%s]",
+            "Loop init debug: current=%u history=%u iris=%.4f cart=%.4f \n"
+            "cart_shift=%d cart_lat=%.3f yaw_bias=%d \n"
+            "submap=%d points=[%zu %zu] \n"
+            "odom_yaw=%.2f iris_yaw+=%.2f iris_yaw-=%.2f \n"
+            "score=[%s] \n cost=[%s] \n corr_t=[%s] \n corr_r=[%s] \n"
+            "odom_delta_t=[%s] \n odom_delta_r=[%s] \n accepted=[%s]",
             candidate.current_id,
             candidate.history_id,
             candidate.iris_distance,
             candidate.cart_distance,
-            candidate.fused_distance,
             candidate.cart_shift_cols,
             candidate.cart_lateral_offset_m,
             candidate.yaw_bias,
@@ -1376,6 +1714,7 @@ namespace small_dlio {
         const GicpTrial *best_trial = nullptr;
         for (const auto &trial : trials) {
 
+            // 只在通过 score 和 correction gate 的 trial 中选最小代价。
             if (!trial.accepted)
                 continue;
             if (!best_trial ||
@@ -1387,13 +1726,12 @@ namespace small_dlio {
 
             RCLCPP_WARN_THROTTLE(
                 get_logger(), *get_clock(), 2000,
-                "Loop GICP rejected: current=%u history=%u iris=%.4f cart=%.4f fused=%.4f "
+                "Loop GICP rejected: current=%u history=%u iris=%.4f cart=%.4f "
                 "accepted=[%s] score=[%s] cost=[%s]",
                 candidate.current_id,
                 candidate.history_id,
                 candidate.iris_distance,
                 candidate.cart_distance,
-                candidate.fused_distance,
                 accepted_stream.str().c_str(),
                 score_stream.str().c_str(),
                 cost_stream.str().c_str()
@@ -1405,6 +1743,7 @@ namespace small_dlio {
         const double corr_r_deg = best_trial->correction_rot_deg;
 
         candidate.gicp_score = best_trial->result.score;
+        candidate.gicp_selection_cost = best_trial->selection_cost;
         candidate.gicp_correction_trans = corr_t;
         candidate.gicp_correction_rot_deg = corr_r_deg;
         candidate.source_to_target = best_trial->result.transform;
@@ -1412,15 +1751,14 @@ namespace small_dlio {
 
         RCLCPP_INFO(
             get_logger(),
-            "Accepted loop by GICP: current=%u history=%u init=%s iris=%.4f "
-            "cart=%.4f fused=%.4f cart_shift=%d cart_lat=%.3f "
+            "GICP candidate accepted: current=%u history=%u init=%s iris=%.4f "
+            "cart=%.4f cart_shift=%d cart_lat=%.3f "
             "submap=%d points=[%zu %zu] score=%.4f cost=%.4f corr_t=%.3f corr_r=%.2f",
             candidate.current_id,
             candidate.history_id,
             best_trial->label.c_str(),
             candidate.iris_distance,
             candidate.cart_distance,
-            candidate.fused_distance,
             candidate.cart_shift_cols,
             candidate.cart_lateral_offset_m,
             loop_gicp_use_submap_ ? 1 : 0,
@@ -1554,6 +1892,8 @@ namespace small_dlio {
         const char *param_name
     ) const {
 
+        // 优先使用 6 维对角信息矩阵；旧的标量权重只作为配置缺失
+        // 或非法时的兼容 fallback。
         Eigen::Matrix<double, 6, 6> information =
             Eigen::Matrix<double, 6, 6>::Zero();
 
@@ -1620,6 +1960,8 @@ namespace small_dlio {
         const LoopKeyFrame &keyframe
     ) {
 
+        // PGO 图和关键帧库使用同一套 backend id。新节点加入后，
+        // 如果存在前一关键帧，就添加连续里程计边。
         const Eigen::Isometry3d current_pose = poseToIsometry(keyframe.pose);
         if (!current_pose.matrix().allFinite())
             return false;
@@ -1710,7 +2052,8 @@ namespace small_dlio {
             !candidate.source_to_target.allFinite())
             return false;
 
-        // 三明治乘法转回 body
+        // GICP 在 lidar 坐标下验证回环；PGO 节点姿态在 body 坐标下，
+        // 所以先用外参三明治乘法把 history_lidar<-current_lidar 转回 body。
         const Eigen::Isometry3d history_lidar_from_current_lidar =
             matrixToIsometry(candidate.source_to_target);
         if (!history_lidar_from_current_lidar.matrix().allFinite())
@@ -1738,15 +2081,49 @@ namespace small_dlio {
                 history_body_from_current_body.inverse()
             );
 
+        // loop 信息矩阵先取基础 diag，再按 GICP score 动态缩放：
+        // score 越小认为配准越可信，loop 约束越强。
+        Eigen::Matrix<double, 6, 6> loop_information =
+            makeInformationMatrix(
+                pgo_loop_info_diag_,
+                pgo_loop_edge_weight_,
+                "pgo_loop_info_diag"
+            );
+        double loop_info_scale = 1.0;
+        if (pgo_loop_info_dynamic_enable_) {
+
+            const double score_for_scale =
+                std::isfinite(candidate.gicp_score)
+                    ? std::max(candidate.gicp_score, pgo_loop_info_score_floor_)
+                    : pgo_loop_info_score_floor_;
+            loop_info_scale = std::clamp(
+                pgo_loop_info_score_ref_ / score_for_scale,
+                pgo_loop_info_min_scale_,
+                pgo_loop_info_max_scale_
+            );
+            loop_information *= loop_info_scale;
+        }
+
         RCLCPP_INFO(
             get_logger(),
-            "Loop edge debug: history=%u current=%u score=%.4f iris=%.4f "
+            "Loop edge debug: history=%u current=%u gicp_score=%.4f iris=%.4f "
+            "loop_info_scale=%.3f robust_kernel_enable=%d robust_kernel_delta=%.3f "
+            "loop_info_diag_after_scale=[%.3f %.3f %.3f %.3f %.3f %.3f] "
             "odom_vs_direct_dp=%.3f dr=%.2f odom_vs_inverse_dp=%.3f dr=%.2f "
             "direct_t=[%.3f %.3f %.3f] inv_t=[%.3f %.3f %.3f]",
             candidate.history_id,
             candidate.current_id,
             candidate.gicp_score,
             candidate.iris_distance,
+            loop_info_scale,
+            pgo_loop_robust_kernel_enable_ ? 1 : 0,
+            pgo_loop_robust_kernel_delta_,
+            loop_information(0, 0),
+            loop_information(1, 1),
+            loop_information(2, 2),
+            loop_information(3, 3),
+            loop_information(4, 4),
+            loop_information(5, 5),
             direct_delta.first,
             direct_delta.second,
             inverse_delta.first,
@@ -1763,12 +2140,10 @@ namespace small_dlio {
             candidate.history_id,
             candidate.current_id,
             history_body_from_current_body,
-            makeInformationMatrix(
-                pgo_loop_info_diag_,
-                pgo_loop_edge_weight_,
-                "pgo_loop_info_diag"
-            ),
-            candidate.gicp_score
+            loop_information,
+            candidate.gicp_score,
+            pgo_loop_robust_kernel_enable_,
+            pgo_loop_robust_kernel_delta_
         );
     }
 
@@ -1776,6 +2151,8 @@ namespace small_dlio {
         const bool has_new_loop
     ) {
 
+        // 默认只在新增 loop edge 后优化。这样普通 odom 边持续入图，
+        // 但不会每个关键帧都触发一次全图优化。
         if (!pgo_enable_)
             return 0.0;
         if (pgo_optimize_on_loop_ && !has_new_loop)
@@ -1813,6 +2190,8 @@ namespace small_dlio {
 
     void LoopDetectorNode::publishOptimizedKeyFrames() const {
 
+        // 发送完整优化关键帧列表给 map_node；map_node 用它重建 /global_map，
+        // 并对尚未优化的尾部关键帧可选应用最近一次 PGO correction。
         if (!pub_optimized_keyframes_ || pose_graph_.empty())
             return;
 

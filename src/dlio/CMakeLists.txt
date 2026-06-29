@@ -137,6 +137,10 @@ add_executable(fastlio_keyframe_bridge
   src/fastlio_keyframe_bridge.cpp
 )
 
+add_executable(odom_path_bridge
+  src/odom_path_bridge.cpp
+)
+
 rosidl_get_typesupport_target(cpp_typesupport_target
   ${PROJECT_NAME} rosidl_typesupport_cpp
 )
@@ -210,6 +214,12 @@ ament_target_dependencies(fastlio_keyframe_bridge
   nav_msgs
 )
 
+ament_target_dependencies(odom_path_bridge
+  rclcpp
+  geometry_msgs
+  nav_msgs
+)
+
 target_link_libraries(dlio_node
   Eigen3::Eigen
   ${PCL_LIBRARIES}
@@ -240,7 +250,12 @@ target_link_libraries(fastlio_keyframe_bridge
   "${cpp_typesupport_target}"
 )
 
-install(TARGETS dlio_node loop_detector_node map_node fastlio_keyframe_bridge
+install(TARGETS
+  dlio_node
+  loop_detector_node
+  map_node
+  fastlio_keyframe_bridge
+  odom_path_bridge
   DESTINATION lib/${PROJECT_NAME}
 )
 

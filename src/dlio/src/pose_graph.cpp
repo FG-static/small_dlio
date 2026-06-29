@@ -2,6 +2,7 @@
 
 #include <g2o/core/block_solver.h>
 #include <g2o/core/optimization_algorithm_levenberg.h>
+#include <g2o/core/robust_kernel_impl.h>
 #include <g2o/core/sparse_optimizer.h>
 #include <g2o/solvers/eigen/linear_solver_eigen.h>
 #include <g2o/types/slam3d/edge_se3.h>
@@ -133,7 +134,9 @@ namespace small_dlio {
         const uint32_t to_id,
         const Eigen::Isometry3d &relative_pose,
         const Eigen::Matrix<double, 6, 6> &information,
-        const double score
+        const double score,
+        const bool robust_kernel_enabled,
+        const double robust_kernel_delta
     ) {
 
         PoseGraphEdge edge;
@@ -143,6 +146,8 @@ namespace small_dlio {
         edge.relative_pose = relative_pose;
         edge.information = information;
         edge.score = score;
+        edge.robust_kernel_enabled = robust_kernel_enabled;
+        edge.robust_kernel_delta = robust_kernel_delta;
         return addEdge(std::move(edge));
     }
 
@@ -164,6 +169,8 @@ namespace small_dlio {
             return summary;
         }
 
+        // 1. 构造 g2o 优化器。当前图只有 SE3 pose 节点和 SE3 相对位姿边，
+        // 这里选择 Levenberg-Marquardt + Eigen 线性求解器完成稀疏图优化。
         // 将稀疏矩阵分块
         using BlockSolverType =
             g2o::BlockSolver<g2o::BlockSolverTraits<6, 6>>;
@@ -183,7 +190,8 @@ namespace small_dlio {
             new g2o::OptimizationAlgorithmLevenberg(std::move(block_solver));
         optimizer.setAlgorithm(algorithm);
 
-        // 转换待优化的节点和边
+        // 2. 将内部 PoseGraphNode 转成 g2o VertexSE3。固定首节点的逻辑
+        // 已经在 addNode() 里写入 node.fixed，这里只按节点状态照搬。
         for (const auto &node : nodes_) {
 
             auto *vertex = new g2o::VertexSE3();
@@ -199,6 +207,8 @@ namespace small_dlio {
             }
         }
 
+        // 3. 将 odom/loop 边统一转成 g2o EdgeSE3。区别只在信息矩阵、
+        // 分数记录和 loop edge 可选的 robust kernel，测量模型保持一致。
         for (const auto &edge : edges_) {
 
             auto *from_vertex =
@@ -216,6 +226,18 @@ namespace small_dlio {
             g2o_edge->setVertex(1, to_vertex);
             g2o_edge->setMeasurement(edge.relative_pose);
             g2o_edge->setInformation(edge.information);
+            if (edge.type == PoseGraphEdgeType::Loop &&
+                edge.robust_kernel_enabled) {
+
+                // 只给 loop edge 挂鲁棒核；odom edge 保持普通二乘，
+                // 避免削弱连续里程计约束。
+                // Huber Kernel 就是 rho(r) =
+                // 小残差：0.5 * r^2 二次损失，和普通 least squares一样; |r| <= delta
+                // 大残差：delta * (|r| - 0.5 * delta) 线性损失; |r| > delta
+                auto *robust_kernel = new g2o::RobustKernelHuber();
+                robust_kernel->setDelta(edge.robust_kernel_delta);
+                g2o_edge->setRobustKernel(robust_kernel);
+            }
 
             if (!optimizer.addEdge(g2o_edge)) {
 
@@ -225,6 +247,7 @@ namespace small_dlio {
             }
         }
 
+        // 4. 记录优化前后 chi2，便于日志判断 PGO 是否真的改变了图。
         if (!optimizer.initializeOptimization()) {
 
             summary.message = "failed to initialize g2o optimization";
@@ -246,6 +269,8 @@ namespace small_dlio {
             return summary;
         }
 
+        // 5. 把 g2o 优化结果写回内部节点。后续 /optimized_path、
+        // /optimized_keyframes 和 map_node 重建地图都读取这里的节点姿态。
         for (auto &node : nodes_) {
 
             const auto *vertex = dynamic_cast<const g2o::VertexSE3 *>(
@@ -313,6 +338,11 @@ namespace small_dlio {
             return false;
         if (edge.type == PoseGraphEdgeType::Loop &&
             !std::isfinite(edge.score))
+            return false;
+        if (edge.type == PoseGraphEdgeType::Loop &&
+            edge.robust_kernel_enabled &&
+            (!std::isfinite(edge.robust_kernel_delta) ||
+             edge.robust_kernel_delta <= 0.0))
             return false;
 
         edge.information = sanitizedInformation(edge.information);

@@ -21,6 +21,7 @@ namespace small_dlio {
 
         int max_iterations = 20;
         bool fix_first_node = true;
+        // just used by fallback
         double odom_edge_weight = 100.0;
         double loop_edge_weight = 500.0;
     };
@@ -42,6 +43,8 @@ namespace small_dlio {
         Eigen::Matrix<double, 6, 6> information =
             Eigen::Matrix<double, 6, 6>::Identity();
         double score = 0.0;
+        bool robust_kernel_enabled = false;
+        double robust_kernel_delta = 1.0;
     };
 
     struct PoseGraphOptimizationSummary {
@@ -91,7 +94,9 @@ namespace small_dlio {
             uint32_t to_id,
             const Eigen::Isometry3d &relative_pose,
             const Eigen::Matrix<double, 6, 6> &information,
-            double score
+            double score,
+            bool robust_kernel_enabled,
+            double robust_kernel_delta
         );
 
         PoseGraphOptimizationSummary optimize();

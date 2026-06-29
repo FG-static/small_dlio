@@ -29,6 +29,8 @@ namespace small_dlio {
 
         global_map_ = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
 
+        // map_node 是纯重建节点：订阅原始关键帧和优化关键帧，
+        // 每次状态更新后重新拼接并发布 /global_map。
         pub_map_ = create_publisher<sensor_msgs::msg::PointCloud2>(
             map_topic_, rclcpp::QoS(1).reliable().transient_local()
         );
@@ -63,6 +65,8 @@ namespace small_dlio {
 
     void MapNode::loadParams() {
 
+        // 地图重建参数包括输出话题/保存路径、body-lidar 外参，
+        // 以及 PGO 后尾部未优化关键帧的处理策略。
         this->declare_parameter("map_leaf_size", 0.1);
         this->declare_parameter("map_topic", "/global_map");
         this->declare_parameter("map_frame", map_frame_);
@@ -75,6 +79,14 @@ namespace small_dlio {
         this->declare_parameter(
             "rebuild_unoptimized_keyframes_with_approximation",
             rebuild_unoptimized_keyframes_with_approximation_
+        );
+        this->declare_parameter(
+            "apply_pgo_correction_to_unoptimized_keyframes",
+            apply_pgo_correction_to_unoptimized_keyframes_
+        );
+        this->declare_parameter(
+            "optimized_keyframes_tail_exclusion_count",
+            optimized_keyframes_tail_exclusion_count_
         );
 
         this->get_parameter("map_leaf_size", map_leaf_size_);
@@ -90,6 +102,16 @@ namespace small_dlio {
             "rebuild_unoptimized_keyframes_with_approximation",
             rebuild_unoptimized_keyframes_with_approximation_
         );
+        this->get_parameter(
+            "apply_pgo_correction_to_unoptimized_keyframes",
+            apply_pgo_correction_to_unoptimized_keyframes_
+        );
+        this->get_parameter(
+            "optimized_keyframes_tail_exclusion_count",
+            optimized_keyframes_tail_exclusion_count_
+        );
+        if (optimized_keyframes_tail_exclusion_count_ < 0)
+            optimized_keyframes_tail_exclusion_count_ = 0;
 
         const std::vector<double> t_default = {0.0, 0.0, 0.0};
         const std::vector<double> q_default = {1.0, 0.0, 0.0, 0.0};
@@ -104,6 +126,8 @@ namespace small_dlio {
         Eigen::Vector3d translation = Eigen::Vector3d::Zero();
         Eigen::Quaterniond rotation = Eigen::Quaterniond::Identity();
 
+        // 支持 t/q 和 T_body_lidar 两种外参配置。完整矩阵存在时优先使用，
+        // 这样 launch/yaml 可以直接复用标定工具输出。
         if (t.size() == 3) {
             translation = Eigen::Vector3d(t[0], t[1], t[2]);
         } else {
@@ -175,8 +199,12 @@ namespace small_dlio {
         );
         RCLCPP_INFO(
             get_logger(),
-            "Map rebuild_unoptimized_keyframes_with_approximation=%d",
-            rebuild_unoptimized_keyframes_with_approximation_ ? 1 : 0
+            "Map rebuild_unoptimized_keyframes_with_approximation=%d "
+            "apply_pgo_correction_to_unoptimized_keyframes=%d "
+            "optimized_keyframes_tail_exclusion_count=%d",
+            rebuild_unoptimized_keyframes_with_approximation_ ? 1 : 0,
+            apply_pgo_correction_to_unoptimized_keyframes_ ? 1 : 0,
+            optimized_keyframes_tail_exclusion_count_
         );
     }
 
@@ -186,6 +214,8 @@ namespace small_dlio {
 
         if (!msg) return;
 
+        // 原始关键帧先统一到 body frame 存储。后续重建地图时，
+        // 每个局部点云只需要乘 keyframe pose 到 map/world frame。
         auto cloud = normalizeCloudToBodyFrame(*msg);
         if (cloud->empty()) return;
 
@@ -201,6 +231,8 @@ namespace small_dlio {
             const auto optimized_it = optimized_poses_.find(msg->id);
             if (optimized_it != optimized_poses_.end()) {
 
+                // 如果优化结果先到、关键帧后到，用这一对 raw/optimized
+                // 及时刷新 PGO correction，方便尾部未优化帧近似跟随。
                 const Eigen::Isometry3d raw_pose =
                     poseToIsometry(msg->pose);
                 const Eigen::Isometry3d optimized_pose =
@@ -227,14 +259,30 @@ namespace small_dlio {
 
         std::lock_guard<std::mutex> lock(map_mutex_);
 
+        // 优化关键帧列表是全量快照。这里更新 optimized_poses_，
+        // 同时可排除最新若干帧，避免还不稳定的 PGO 尾部拉动地图。
         bool have_latest_pair = false;
         double latest_stamp = -std::numeric_limits<double>::infinity();
         Eigen::Isometry3d latest_raw = Eigen::Isometry3d::Identity();
         Eigen::Isometry3d latest_optimized = Eigen::Isometry3d::Identity();
+        uint32_t latest_id = 0;
+        const size_t tail_exclusion_count =
+            std::min(
+                static_cast<size_t>(optimized_keyframes_tail_exclusion_count_),
+                msg->ids.size()
+            );
+        const size_t optimized_limit = msg->ids.size() - tail_exclusion_count;
+        size_t excluded_tail_count = 0;
 
         for (size_t i = 0; i < msg->ids.size(); ++i) {
 
             const uint32_t id = msg->ids[i];
+            if (i >= optimized_limit) {
+
+                optimized_poses_.erase(id);
+                ++ excluded_tail_count;
+                continue;
+            }
             optimized_poses_[id] = msg->poses[i];
 
             const auto kf_it = keyframes_.find(id);
@@ -255,14 +303,50 @@ namespace small_dlio {
                 latest_stamp = stamp;
                 latest_raw = raw_pose;
                 latest_optimized = optimized_pose;
+                latest_id = id;
                 have_latest_pair = true;
             }
         }
 
         if (have_latest_pair) {
 
+            // 用最新的 raw/optimized 同名关键帧估计全局 correction。
+            // 未出现在 optimized_poses_ 中的尾部关键帧可用它做近似修正。
             pgo_correction_ = latest_optimized * latest_raw.inverse();
             has_pgo_correction_ = pgo_correction_.matrix().allFinite();
+            Eigen::Quaterniond q(pgo_correction_.rotation());
+            q.normalize();
+            double correction_rot_deg =
+                Eigen::AngleAxisd(q).angle() * 180.0 / M_PI;
+            if (correction_rot_deg > 180.0)
+                correction_rot_deg = 360.0 - correction_rot_deg;
+            RCLCPP_INFO(
+                get_logger(),
+                "Map updated PGO correction: anchor=%u raw=[%.3f %.3f %.3f] "
+                "optimized=[%.3f %.3f %.3f] correction_t=[%.3f %.3f %.3f] "
+                "correction_rot=%.2fdeg",
+                latest_id,
+                latest_raw.translation().x(),
+                latest_raw.translation().y(),
+                latest_raw.translation().z(),
+                latest_optimized.translation().x(),
+                latest_optimized.translation().y(),
+                latest_optimized.translation().z(),
+                pgo_correction_.translation().x(),
+                pgo_correction_.translation().y(),
+                pgo_correction_.translation().z(),
+                correction_rot_deg
+            );
+        }
+        if (excluded_tail_count > 0) {
+
+            RCLCPP_INFO(
+                get_logger(),
+                "Map excluded optimized keyframe tail: excluded=%zu accepted=%zu total=%zu",
+                excluded_tail_count,
+                optimized_limit,
+                msg->ids.size()
+            );
         }
 
         rebuildMap(rclcpp::Time(msg->header.stamp));
@@ -317,6 +401,8 @@ namespace small_dlio {
         const dlio::msg::KeyFrame &msg
     ) const {
 
+        // keyframe cloud 可能来自 body frame，也可能来自 lidar frame。
+        // 内部统一存 body frame，避免 rebuildMap() 里重复判断 frame_id。
         auto cloud_in = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
         pcl::fromROSMsg(msg.cloud, *cloud_in);
 
@@ -352,7 +438,15 @@ namespace small_dlio {
         const rclcpp::Time &stamp
     ) {
 
+        // 重建策略：
+        // - 有优化位姿的关键帧使用 optimized pose；
+        // - 没有优化位姿的尾部关键帧可跳过，或用 raw pose 叠加 PGO correction；
+        // - 最后统一 voxel downsample 并发布 transient_local 地图。
         auto rebuilt = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        size_t optimized_count = 0;
+        size_t corrected_unoptimized_count = 0;
+        size_t raw_unoptimized_count = 0;
+        size_t skipped_unoptimized_count = 0;
         for (const auto &kv : keyframes_) {
 
             const uint32_t id = kv.first;
@@ -365,20 +459,42 @@ namespace small_dlio {
             if (optimized_it != optimized_poses_.end()) {
 
                 T = poseToIsometry(optimized_it->second);
+                ++ optimized_count;
             } else {
 
+                // 一旦有过优化快照，未优化帧通常是最新尾部。
+                // 可根据参数选择跳过它们，或者用 correction 近似贴合优化轨迹。
                 if (!optimized_poses_.empty() &&
-                    !rebuild_unoptimized_keyframes_with_approximation_)
+                    !rebuild_unoptimized_keyframes_with_approximation_) {
+
+                    ++ skipped_unoptimized_count;
                     continue;
+                }
 
                 T = poseToIsometry(keyframe.raw_pose);
-                if (has_pgo_correction_)
+                if (apply_pgo_correction_to_unoptimized_keyframes_ &&
+                    has_pgo_correction_) {
+
                     T = pgo_correction_ * T;
+                    ++ corrected_unoptimized_count;
+                    RCLCPP_INFO_THROTTLE(
+                        get_logger(), *get_clock(), 2000,
+                        "Applied PGO correction to unoptimized map keyframe: id=%u correction_t=[%.3f %.3f %.3f]",
+                        id,
+                        pgo_correction_.translation().x(),
+                        pgo_correction_.translation().y(),
+                        pgo_correction_.translation().z()
+                    );
+                } else {
+
+                    ++ raw_unoptimized_count;
+                }
             }
 
             if (!T.matrix().allFinite())
                 continue;
 
+            // local_cloud 已经在存储时转到 body frame，这里只做 body->map/world。
             pcl::PointCloud<pcl::PointXYZ> cloud_world;
             pcl::transformPointCloud(
                 *keyframe.local_cloud,
@@ -390,6 +506,8 @@ namespace small_dlio {
         }
 
         if (rebuilt->empty()) return;
+        // 地图每次全量重建后再降采样，保证 optimized pose 更新后
+        // 不会混入旧位置的历史点云。
         pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
         voxel_filter.setLeafSize(
             static_cast<float>(map_leaf_size_),
@@ -401,6 +519,34 @@ namespace small_dlio {
         voxel_filter.filter(*cloud_filtered);
 
         global_map_ = cloud_filtered;
+
+        double correction_rot_deg = 0.0;
+        if (has_pgo_correction_) {
+
+            Eigen::Quaterniond q(pgo_correction_.rotation());
+            q.normalize();
+            correction_rot_deg = Eigen::AngleAxisd(q).angle() * 180.0 / M_PI;
+            if (correction_rot_deg > 180.0)
+                correction_rot_deg = 360.0 - correction_rot_deg;
+        }
+        RCLCPP_INFO_THROTTLE(
+            get_logger(), *get_clock(), 1000,
+            "Map rebuild stats: stored=%zu optimized=%zu corrected_unoptimized=%zu "
+            "raw_unoptimized=%zu skipped_unoptimized=%zu has_correction=%d "
+            "correction_t=[%.3f %.3f %.3f] correction_rot=%.2fdeg points=%zu filtered=%zu",
+            keyframes_.size(),
+            optimized_count,
+            corrected_unoptimized_count,
+            raw_unoptimized_count,
+            skipped_unoptimized_count,
+            has_pgo_correction_ ? 1 : 0,
+            pgo_correction_.translation().x(),
+            pgo_correction_.translation().y(),
+            pgo_correction_.translation().z(),
+            correction_rot_deg,
+            rebuilt->size(),
+            global_map_->size()
+        );
 
         sensor_msgs::msg::PointCloud2 map_msg;
         pcl::toROSMsg(*global_map_, map_msg);
