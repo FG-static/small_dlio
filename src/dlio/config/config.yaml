@@ -56,8 +56,19 @@ small_dlio_odom:
         kf_trans_thresh: 0.1 # meters
         kf_rot_thresh: 0.05 # radians (~2~4 deg)
         max_alignment_score: 3.0
+        keyframe_exclusion_box_enable: true
+        keyframe_exclusion_min_x: -3.0
+        keyframe_exclusion_max_x: -0.2
+        keyframe_exclusion_min_y: -1.2
+        keyframe_exclusion_max_y: 1.2
+        keyframe_exclusion_min_z: -0.1
+        keyframe_exclusion_max_z: 2.0
 
-        # ========== Submap (kd-tree) ==========
+        # ========== Submap Selection ==========
+        submap_selection_mode: "recent_window" # recent_window / spatial_knn
+        submap_window_keyframes: 20
+        submap_window_min_keyframes: 5
+        submap_window_max_travel_distance: -1.0 # negative disables travel-distance limiting
         knn_limit: 12
         max_distance: 20.0 # meters
         log_throttle_ms: 10

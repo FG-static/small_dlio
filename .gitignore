@@ -18,3 +18,14 @@ LeLeMc2010_quadrotor.pdf
 tools/
 fastlio_backend.launch.py
 fastlio_keyframe_bridge.cpp
+odom_path_bridge.cpp
+fastlio_garage_mid360.yaml
+
+global_map.ply
+global_map_script_test.ply
+map_compare_best_vs_current.png
+Plan.md
+the_best_global_map.pcd
+the_best_global_map.ply
+
+debug_clouds/

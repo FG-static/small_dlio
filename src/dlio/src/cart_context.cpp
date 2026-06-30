@@ -270,6 +270,39 @@ namespace small_dlio {
         return descriptor;
     }
 
+    CartContext::Descriptor CartContext::flipped180(
+        const Descriptor &descriptor
+    ) const {
+
+        Descriptor flipped;
+        if (num_x_ <= 0 || num_y_ <= 0)
+            return flipped;
+        if (descriptor.image.rows() != num_x_ ||
+            descriptor.image.cols() != num_y_)
+            return flipped;
+
+        flipped.image = Eigen::MatrixXf::Zero(num_x_, num_y_);
+        flipped.retrieval_key = Eigen::VectorXf::Zero(num_x_);
+        flipped.align_key = Eigen::VectorXf::Zero(num_y_);
+
+        for (int x = 0; x < num_x_; ++ x) {
+
+            for (int y = 0; y < num_y_; ++ y) {
+
+                flipped.image(x, y) =
+                    descriptor.image(num_x_ - 1 - x, num_y_ - 1 - y);
+            }
+        }
+
+        for (int x = 0; x < num_x_; ++ x)
+            flipped.retrieval_key(x) = flipped.image.row(x).mean();
+
+        for (int y = 0; y < num_y_; ++ y)
+            flipped.align_key(y) = flipped.image.col(y).mean();
+
+        return flipped;
+    }
+
     CartContext::MatchResult CartContext::compare(
         const Descriptor &current,
         const Descriptor &history

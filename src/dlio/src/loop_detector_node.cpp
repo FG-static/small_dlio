@@ -16,6 +16,7 @@
 #include <sstream>
 #include <rclcpp/qos_overriding_options.hpp>
 #include <utility>
+#include <vector>
 
 namespace small_dlio {
 
@@ -210,6 +211,9 @@ namespace small_dlio {
             "pgo_loop_robust_kernel_delta",
             pgo_loop_robust_kernel_delta_
         );
+        declare_parameter("lcd_retrieval_enable", lcd_retrieval_enable_);
+        declare_parameter("lcd_retrieval_top_k", lcd_retrieval_top_k_);
+        declare_parameter("lcd_retrieval_max_distance", lcd_retrieval_max_distance_);
         declare_parameter("iris_nscale", iris_nscale_);
         declare_parameter("iris_min_wave_length", iris_min_wave_length_);
         declare_parameter("iris_mult", iris_mult_);
@@ -302,6 +306,18 @@ namespace small_dlio {
             "pgo_loop_robust_kernel_delta",
             pgo_loop_robust_kernel_delta_
         );
+        get_parameter(
+            "lcd_retrieval_enable",
+            lcd_retrieval_enable_
+        );
+        get_parameter(
+            "lcd_retrieval_top_k",
+            lcd_retrieval_top_k_
+        );
+        get_parameter(
+            "lcd_retrieval_max_distance",
+            lcd_retrieval_max_distance_
+        );
         get_parameter("iris_nscale", iris_nscale_);
         get_parameter("iris_min_wave_length", iris_min_wave_length_);
         get_parameter("iris_mult", iris_mult_);
@@ -353,6 +369,10 @@ namespace small_dlio {
             loop_descriptor_verify_top_k_ = 1;
         loop_descriptor_verify_top_k_ =
             std::min(loop_descriptor_verify_top_k_, cart_candidate_top_k_);
+        if (lcd_retrieval_top_k_ < 1)
+            lcd_retrieval_top_k_ = 1;
+        if (!std::isfinite(lcd_retrieval_max_distance_))
+            lcd_retrieval_max_distance_ = -1.0;
         if (!std::isfinite(cart_distance_thresh_) ||
             cart_distance_thresh_ <= 0.0)
             cart_distance_thresh_ = std::numeric_limits<double>::infinity();
@@ -544,6 +564,7 @@ namespace small_dlio {
             get_logger(),
             "Cart Context: enabled=%d unit=[%.3f %.3f] range=[%.1f %.1f] "
             "voxel=%.3f align_key=%d align_ratio=%.3f "
+            "retrieval=%d retrieval_top_k=%d retrieval_max_dist=%.3f "
             "iris_top_k=%d verify_top_k=%d cart_thresh=%.3f",
             cart_enable_ ? 1 : 0,
             cart_x_unit_m_,
@@ -553,6 +574,9 @@ namespace small_dlio {
             cart_voxel_leaf_m_,
             cart_use_align_key_ ? 1 : 0,
             cart_align_search_ratio_,
+            lcd_retrieval_enable_ ? 1 : 0,
+            lcd_retrieval_top_k_,
+            lcd_retrieval_max_distance_,
             cart_candidate_top_k_,
             loop_descriptor_verify_top_k_,
             cart_distance_thresh_
@@ -591,8 +615,10 @@ namespace small_dlio {
             return;
         }
 
+        // 保留输入 keyframe 的原始 id。map_node 按这个 id 存点云，
+        // PGO 发布 optimized_keyframes 时也必须使用同一套 id，否则优化位姿
+        // 会套到错误的点云上，地图会在首次 PGO 后大幅错位。
         dlio::msg::KeyFrame accepted_msg = *msg;
-        accepted_msg.id = next_backend_keyframe_id_;
         const rclcpp::Time timing_stamp(accepted_msg.header.stamp);
 
         // 2. 可选地裁掉指定空间盒内的点，再转换成后端内部 LoopKeyFrame。
@@ -645,7 +671,6 @@ namespace small_dlio {
         const double descriptor_ms =
             elapsedMs(descriptor_start, SteadyClock::now());
 
-        ++ next_backend_keyframe_id_;
         if (pub_filtered_keyframe_)
             pub_filtered_keyframe_->publish(accepted_msg);
 
@@ -681,9 +706,14 @@ namespace small_dlio {
             const auto loop_start = SteadyClock::now();
             std::vector<LoopCandidate> candidates;
             float best_distance = std::numeric_limits<float>::infinity();
+            float best_cart_distance = std::numeric_limits<float>::infinity();
             int eligible_count = 0;
             if (detectLoopCandidates(
-                    keyframe, candidates, best_distance, eligible_count)) {
+                    keyframe,
+                    candidates,
+                    best_distance,
+                    best_cart_distance,
+                    eligible_count)) {
 
                 size_t verified_count = 0U;
                 for (auto &candidate : candidates) {
@@ -740,12 +770,13 @@ namespace small_dlio {
                 ++ candidate_misses_;
                 RCLCPP_INFO_THROTTLE(
                     get_logger(), *get_clock(), 2000,
-                    "Loop candidate miss: current=%u eligible=%d best_iris=%.4f "
+                    "Loop candidate miss: current=%u eligible=%d best_iris=%.4f best_cart=%.4f "
                     "iris_thresh=%.4f cart_thresh=%.4f stored=%zu received=%lu iris_fail=%lu "
                     "hits=%lu misses=%lu",
                     keyframe.id,
                     eligible_count,
                     best_distance,
+                    best_cart_distance,
                     loop_iris_distance_thresh_,
                     cart_distance_thresh_,
                     keyframes_.size(),
@@ -1079,6 +1110,82 @@ namespace small_dlio {
         return true;
     }
 
+    std::vector<LoopDetectorNode::RetrievalHit> LoopDetectorNode::retrieveByCartKey(
+        const LoopKeyFrame &current,
+        int &eligible_count
+    ) const {
+
+        std::vector<LoopDetectorNode::RetrievalHit> hits;
+        for (const auto &history : keyframes_) {
+
+            if (!isCandidateAllowed(current, history))
+                continue;
+
+            ++ eligible_count;
+
+            if (!current.has_cart_descriptor ||
+                !history.has_cart_descriptor)
+                continue;
+
+            const Eigen::VectorXf &current_key =
+                current.cart_descriptor.retrieval_key;
+            const Eigen::VectorXf &history_key =
+                history.cart_descriptor.retrieval_key;
+            const float dist = std::min(
+                retrievalKeyDistance(current_key, history_key),
+                retrievalKeyReverseDistance(current_key, history_key)
+            );
+
+            if (!std::isfinite(dist))
+                continue;
+            if (lcd_retrieval_max_distance_ > 0.0 &&
+                dist > lcd_retrieval_max_distance_)
+                continue;
+
+            hits.push_back({&history, dist});
+        }
+        std::sort(
+            hits.begin(), hits.end(),
+            [](
+                const LoopDetectorNode::RetrievalHit &a,
+                const LoopDetectorNode::RetrievalHit &b
+            ) {
+                return a.distance < b.distance;
+            }
+        );
+        if (static_cast<int>(hits.size()) > lcd_retrieval_top_k_)
+            hits.resize(static_cast<size_t>(lcd_retrieval_top_k_));
+        return hits;
+    }
+
+    float LoopDetectorNode::retrievalKeyDistance(
+        const Eigen::VectorXf &a,
+        const Eigen::VectorXf &b
+    ) const {
+
+        if (a.size() == 0 || a.size() != b.size())
+            return std::numeric_limits<float>::infinity();
+        return (a - b).norm();
+    }
+
+    float LoopDetectorNode::retrievalKeyReverseDistance(
+        const Eigen::VectorXf &a,
+        const Eigen::VectorXf &b
+    ) const {
+
+        if (a.size() == 0 || a.size() != b.size())
+            return std::numeric_limits<float>::infinity();
+
+        float sum = 0.0F;
+        const int size = static_cast<int>(a.size());
+        for (int i = 0; i < size; ++i) {
+
+            const float diff = a(size - 1 - i) - b(i);
+            sum += diff * diff;
+        }
+        return std::sqrt(sum);
+    }
+
     bool LoopDetectorNode::computeIrisDescriptor(
         LoopKeyFrame &keyframe
     ) {
@@ -1123,20 +1230,32 @@ namespace small_dlio {
     ) const {
 
         float best_distance = std::numeric_limits<float>::infinity();
+        float best_cart_distance = std::numeric_limits<float>::infinity();
         int eligible_count = 0;
-        return detectLoopCandidate(current, candidate, best_distance, eligible_count);
+        return detectLoopCandidate(
+            current,
+            candidate,
+            best_distance,
+            best_cart_distance,
+            eligible_count
+        );
     }
 
     bool LoopDetectorNode::detectLoopCandidate(
         const LoopKeyFrame &current,
         LoopCandidate &candidate,
         float &best_distance,
+        float &best_cart_distance,
         int &eligible_count
     ) const {
 
         std::vector<LoopCandidate> candidates;
         if (!detectLoopCandidates(
-                current, candidates, best_distance, eligible_count) ||
+                current,
+                candidates,
+                best_distance,
+                best_cart_distance,
+                eligible_count) ||
             candidates.empty())
             return false;
 
@@ -1148,11 +1267,13 @@ namespace small_dlio {
         const LoopKeyFrame &current,
         std::vector<LoopCandidate> &candidates,
         float &best_distance,
+        float &best_cart_distance,
         int &eligible_count
     ) const {
 
         candidates.clear();
         best_distance = std::numeric_limits<float>::infinity();
+        best_cart_distance = std::numeric_limits<float>::infinity();
         eligible_count = 0;
 
         struct IrisHit {
@@ -1165,19 +1286,41 @@ namespace small_dlio {
         std::vector<IrisHit> iris_hits;
         iris_hits.reserve(static_cast<size_t>(cart_candidate_top_k_));
 
-        // 第一阶段：遍历历史关键帧，用 LiDAR-Iris 做粗召回。
+        // 第零阶段：遍历历史关键帧，用 retrieval key 做粗召回 search_pool。
         // min keyframe gap 和 travel distance 在 isCandidateAllowed() 中过滤。
-        // O(N * C) kNN search, it will be exchange in the future.
-        for (const auto &history : keyframes_) {
+        // retrieval 分支只把 top-k 历史帧送入昂贵的 LiDAR-Iris 精排。
+        std::vector<const LoopKeyFrame *> search_pool;
+        if (lcd_retrieval_enable_ && cart_enable_) {
 
-            if (!isCandidateAllowed(current, history))
+            const auto retrieval_hits =
+                retrieveByCartKey(current, eligible_count);
+            search_pool.reserve(retrieval_hits.size());
+            for (const auto &hit : retrieval_hits) {
+
+                if (hit.history)
+                    search_pool.push_back(hit.history);
+            }
+        } else {
+
+            search_pool.reserve(keyframes_.size());
+            for (const auto &history : keyframes_) {
+
+                if (!isCandidateAllowed(current, history))
+                    continue;
+                ++eligible_count;
+                search_pool.push_back(&history);
+            }
+        }
+        // 第一阶段：遍历粗召回的 search_pool 进行 iris 比对
+        for (const auto &history : search_pool) {
+
+            if (!history)
                 continue;
-            ++ eligible_count;
 
             int yaw_bias = 0;
             float dis = lidar_iris_->Compare(
                 current.iris_descriptor,
-                history.iris_descriptor,
+                history->iris_descriptor,
                 &yaw_bias
             );
 
@@ -1190,7 +1333,7 @@ namespace small_dlio {
             if (dis >= loop_iris_distance_thresh_)
                 continue;
 
-            iris_hits.push_back(IrisHit{&history, dis, yaw_bias});
+            iris_hits.push_back(IrisHit{history, dis, yaw_bias});
         }
 
         std::sort(
@@ -1209,8 +1352,8 @@ namespace small_dlio {
         int cart_debug_rank = 0;
         for (const IrisHit &hit : iris_hits) {
 
-            // 第二阶段：可选 Cart Context 复核。它提供距离、yaw shift
-            // 和横向偏移提示，后续 GICP 会用这些提示扩展初值。
+            // 第二阶段：可选 Cart Context 复核。正常描述子和 180 度翻转
+            // 描述子各比一次，避免相反朝向经过同一区域时被 Cart 误筛掉。
             if (!hit.history)
                 continue;
 
@@ -1232,11 +1375,36 @@ namespace small_dlio {
                     continue;
                 }
 
-                const CartContext::MatchResult cart_result =
+                const CartContext::MatchResult cart_result_normal =
                     cart_context_->compare(
                         current.cart_descriptor,
                         hit.history->cart_descriptor
                     );
+                const CartContext::Descriptor current_cart_flipped =
+                    cart_context_->flipped180(current.cart_descriptor);
+                const CartContext::MatchResult cart_result_reverse =
+                    cart_context_->compare(
+                        current_cart_flipped,
+                        hit.history->cart_descriptor
+                    );
+
+                const bool cart_normal_valid =
+                    cart_result_normal.valid &&
+                    std::isfinite(cart_result_normal.distance);
+                const bool cart_reverse_valid =
+                    cart_result_reverse.valid &&
+                    std::isfinite(cart_result_reverse.distance);
+
+                CartContext::MatchResult cart_result = cart_result_normal;
+                bool cart_reverse_used = false;
+                if (cart_reverse_valid &&
+                    (!cart_normal_valid ||
+                     cart_result_reverse.distance < cart_result_normal.distance)) {
+
+                    cart_result = cart_result_reverse;
+                    cart_reverse_used = true;
+                }
+
                 if (!cart_result.valid ||
                     !std::isfinite(cart_result.distance)) {
 
@@ -1244,11 +1412,13 @@ namespace small_dlio {
                         << "#" << cart_debug_rank++
                         << " id=" << hit.history->id
                         << " iris=" << hit.iris_distance
-                        << " cart=nan valid=0 pass=0 ";
+                        << " cart=nan valid=0 pass=0 rev=0 ";
                     continue;
                 }
 
                 cart_distance = cart_result.distance;
+                if (cart_distance < best_cart_distance)
+                    best_cart_distance = cart_distance;
                 cart_shift_cols = cart_result.shift_cols;
                 cart_lateral_offset_m = cart_result.lateral_offset_m;
                 const bool cart_pass = cart_distance <= cart_distance_thresh_;
@@ -1259,6 +1429,7 @@ namespace small_dlio {
                     << " cart=" << cart_distance
                     << " shift=" << cart_shift_cols
                     << " lat=" << cart_lateral_offset_m
+                    << " rev=" << (cart_reverse_used ? 1 : 0)
                     << " valid=1 pass=" << (cart_pass ? 1 : 0) << " ";
                 if (!cart_pass)
                     continue;
@@ -1778,12 +1949,12 @@ namespace small_dlio {
         const LoopKeyFrame &history
     ) const {
 
-        const int id_gap =
-            std::abs(
-                static_cast<int>(current.id) -
-                static_cast<int>(history.id)
+        const int64_t id_gap =
+            std::llabs(
+                static_cast<int64_t>(current.id) -
+                static_cast<int64_t>(history.id)
             );
-        if (id_gap < loop_min_keyframe_gap_)
+        if (id_gap < static_cast<int64_t>(loop_min_keyframe_gap_))
             return false;
 
         const double travel_gap =

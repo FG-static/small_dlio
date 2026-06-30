@@ -294,11 +294,88 @@ namespace small_dlio {
         declare_param("kf_trans_thresh", kf_trans_thresh_, 0.5);
         declare_param("kf_rot_thresh", kf_rot_thresh_, 0.1745);
         declare_param("max_alignment_score", max_alignment_score_, 1.0);
+        declare_param("keyframe_exclusion_box_enable", keyframe_exclusion_box_enable_, false);
+        declare_param("keyframe_exclusion_min_x", keyframe_exclusion_min_x_, -3.0);
+        declare_param("keyframe_exclusion_max_x", keyframe_exclusion_max_x_, -0.2);
+        declare_param("keyframe_exclusion_min_y", keyframe_exclusion_min_y_, -1.2);
+        declare_param("keyframe_exclusion_max_y", keyframe_exclusion_max_y_, 1.2);
+        declare_param("keyframe_exclusion_min_z", keyframe_exclusion_min_z_, -0.1);
+        declare_param("keyframe_exclusion_max_z", keyframe_exclusion_max_z_, 2.0);
+        const bool exclusion_box_valid =
+            std::isfinite(keyframe_exclusion_min_x_) &&
+            std::isfinite(keyframe_exclusion_max_x_) &&
+            std::isfinite(keyframe_exclusion_min_y_) &&
+            std::isfinite(keyframe_exclusion_max_y_) &&
+            std::isfinite(keyframe_exclusion_min_z_) &&
+            std::isfinite(keyframe_exclusion_max_z_) &&
+            keyframe_exclusion_min_x_ <= keyframe_exclusion_max_x_ &&
+            keyframe_exclusion_min_y_ <= keyframe_exclusion_max_y_ &&
+            keyframe_exclusion_min_z_ <= keyframe_exclusion_max_z_;
+        if (keyframe_exclusion_box_enable_ && !exclusion_box_valid) {
+
+            RCLCPP_WARN(
+                get_logger(),
+                "keyframe exclusion box is invalid; disabling odom cloud exclusion"
+            );
+            keyframe_exclusion_box_enable_ = false;
+        }
+        RCLCPP_INFO(
+            get_logger(),
+            "Odom input exclusion box: enabled=%d x=[%.3f %.3f] y=[%.3f %.3f] z=[%.3f %.3f]",
+            keyframe_exclusion_box_enable_ ? 1 : 0,
+            keyframe_exclusion_min_x_,
+            keyframe_exclusion_max_x_,
+            keyframe_exclusion_min_y_,
+            keyframe_exclusion_max_y_,
+            keyframe_exclusion_min_z_,
+            keyframe_exclusion_max_z_
+        );
 
         // Submap
         declare_param("knn_limit", knn_limit_, 5);
         declare_param("max_distance", max_distance_, 20.0);
         declare_param("log_throttle_ms", log_throttle_ms_, 2000);
+        declare_param(
+            "submap_selection_mode",
+            submap_selection_mode_,
+            std::string("recent_window")
+        );
+        declare_param("submap_window_keyframes", submap_window_keyframes_, 20);
+        declare_param("submap_window_min_keyframes", submap_window_min_keyframes_, 5);
+        declare_param(
+            "submap_window_max_travel_distance",
+            submap_window_max_travel_distance_,
+            -1.0
+        );
+        if (submap_selection_mode_ != "recent_window" &&
+            submap_selection_mode_ != "spatial_knn") {
+
+            RCLCPP_WARN(
+                get_logger(),
+                "unknown submap_selection_mode='%s'; using recent_window",
+                submap_selection_mode_.c_str()
+            );
+            submap_selection_mode_ = "recent_window";
+        }
+        if (submap_window_keyframes_ < 1)
+            submap_window_keyframes_ = 1;
+        if (submap_window_min_keyframes_ < 1)
+            submap_window_min_keyframes_ = 1;
+        submap_window_min_keyframes_ =
+            std::min(submap_window_min_keyframes_, submap_window_keyframes_);
+        if (!std::isfinite(submap_window_max_travel_distance_))
+            submap_window_max_travel_distance_ = -1.0;
+        RCLCPP_INFO(
+            get_logger(),
+            "Submap selection: mode=%s knn_limit=%d max_distance=%.3f "
+            "window_keyframes=%d window_min=%d window_max_travel=%.3f",
+            submap_selection_mode_.c_str(),
+            knn_limit_,
+            max_distance_,
+            submap_window_keyframes_,
+            submap_window_min_keyframes_,
+            submap_window_max_travel_distance_
+        );
 
         // GICP
         declare_param("gicp_leaf_size", gicp_leaf_size_, 0.10);
@@ -329,6 +406,215 @@ namespace small_dlio {
         declare_param("geo_max_delta_ba", geo_max_delta_ba_, 0.1);
         declare_param("geo_max_delta_bg", geo_max_delta_bg_, 0.05);
         declare_param("geo_max_velocity", geo_max_velocity_, 20.0);
+    }
+
+    bool OdomNode::filterInputExclusionBox(
+        pcl::PointCloud<PointXYZIT>::Ptr &cloud
+    ) const {
+
+        if (!keyframe_exclusion_box_enable_)
+            return true;
+        if (!cloud || cloud->empty())
+            return false;
+
+        auto filtered = std::make_shared<pcl::PointCloud<PointXYZIT>>();
+        filtered->reserve(cloud->size());
+        for (const auto &point : cloud->points) {
+
+            if (!std::isfinite(point.x) ||
+                !std::isfinite(point.y) ||
+                !std::isfinite(point.z))
+                continue;
+
+            const Eigen::Vector3d point_lidar(point.x, point.y, point.z);
+            const Eigen::Vector3d point_body =
+                extrinsics_.q_body_lidar * point_lidar +
+                extrinsics_.t_body_lidar;
+            const bool inside_box =
+                point_body.x() >= keyframe_exclusion_min_x_ &&
+                point_body.x() <= keyframe_exclusion_max_x_ &&
+                point_body.y() >= keyframe_exclusion_min_y_ &&
+                point_body.y() <= keyframe_exclusion_max_y_ &&
+                point_body.z() >= keyframe_exclusion_min_z_ &&
+                point_body.z() <= keyframe_exclusion_max_z_;
+            if (!inside_box)
+                filtered->push_back(point);
+        }
+
+        filtered->width = static_cast<uint32_t>(filtered->size());
+        filtered->height = 1;
+        filtered->is_dense = false;
+        if (filtered->empty())
+            return false;
+
+        const size_t removed = cloud->size() - filtered->size();
+        if (removed > 0U) {
+
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), *get_clock(), log_throttle_ms_,
+                "Odom input exclusion box removed %zu/%zu points: box x=[%.2f %.2f] y=[%.2f %.2f] z=[%.2f %.2f]",
+                removed,
+                cloud->size(),
+                keyframe_exclusion_min_x_,
+                keyframe_exclusion_max_x_,
+                keyframe_exclusion_min_y_,
+                keyframe_exclusion_max_y_,
+                keyframe_exclusion_min_z_,
+                keyframe_exclusion_max_z_
+            );
+        }
+
+        cloud = filtered;
+        return true;
+    }
+
+    bool OdomNode::selectSubmapKeyframes(
+        const State &query_state,
+        std::vector<KeyFrame> &selected_keyframes
+    ) const {
+
+        selected_keyframes.clear();
+        if (keyframes_.empty())
+            return false;
+
+        if (submap_selection_mode_ == "spatial_knn")
+            return selectSubmapKeyframesBySpatialKnn(query_state, selected_keyframes);
+
+        return selectSubmapKeyframesByRecentWindow(selected_keyframes);
+    }
+
+    bool OdomNode::selectSubmapKeyframesByRecentWindow(
+        std::vector<KeyFrame> &selected_keyframes
+    ) const {
+
+        selected_keyframes.clear();
+        if (keyframes_.empty() || submap_window_keyframes_ <= 0)
+            return false;
+
+        selected_keyframes.reserve(
+            static_cast<size_t>(
+                std::min(submap_window_keyframes_, static_cast<int>(keyframes_.size()))
+            )
+        );
+
+        double accumulated_travel = 0.0;
+        int previous_index = static_cast<int>(keyframes_.size());
+        for (int idx = static_cast<int>(keyframes_.size()) - 1;
+            idx >= 0 &&
+            static_cast<int>(selected_keyframes.size()) < submap_window_keyframes_;
+            -- idx) {
+
+            if (previous_index < static_cast<int>(keyframes_.size())) {
+
+                const auto &newer_pose = keyframes_[previous_index].pose;
+                const auto &older_pose = keyframes_[idx].pose;
+                if (newer_pose.p.allFinite() && older_pose.p.allFinite())
+                    accumulated_travel += (newer_pose.p - older_pose.p).norm();
+            }
+
+            if (submap_window_max_travel_distance_ > 0.0 &&
+                accumulated_travel > submap_window_max_travel_distance_ &&
+                static_cast<int>(selected_keyframes.size()) >=
+                    submap_window_min_keyframes_)
+                break;
+
+            const auto &kf = keyframes_[idx];
+            if (kf.cloud && !kf.cloud->empty())
+                selected_keyframes.push_back(kf);
+            previous_index = idx;
+        }
+
+        std::reverse(selected_keyframes.begin(), selected_keyframes.end());
+        RCLCPP_INFO_THROTTLE(
+            get_logger(), *get_clock(), log_throttle_ms_,
+            "Submap selected: mode=recent_window selected=%zu total=%zu window=%d travel_limit=%.3f",
+            selected_keyframes.size(),
+            keyframes_.size(),
+            submap_window_keyframes_,
+            submap_window_max_travel_distance_
+        );
+        return !selected_keyframes.empty();
+    }
+
+    bool OdomNode::selectSubmapKeyframesBySpatialKnn(
+        const State &query_state,
+        std::vector<KeyFrame> &selected_keyframes
+    ) const {
+
+        selected_keyframes.clear();
+        if (keyframes_.empty() ||
+            !query_state.pose.p.allFinite() ||
+            knn_limit_ <= 0 ||
+            max_distance_ <= 0.0)
+            return false;
+
+        if (keyframe_positions_ &&
+            keyframe_kdtree_ &&
+            !keyframe_positions_->empty() &&
+            keyframe_positions_->size() == keyframes_.size()) {
+
+            pcl::PointXYZ query;
+            query.x = static_cast<float>(query_state.pose.p.x());
+            query.y = static_cast<float>(query_state.pose.p.y());
+            query.z = static_cast<float>(query_state.pose.p.z());
+
+            const int k =
+                std::min(knn_limit_, static_cast<int>(keyframes_.size()));
+            std::vector<int> indices;
+            std::vector<float> sq_dists;
+            indices.reserve(k);
+            sq_dists.reserve(k);
+
+            const int found =
+                keyframe_kdtree_->nearestKSearch(query, k, indices, sq_dists);
+            const double max_sq_dist = max_distance_ * max_distance_;
+            for (int i = 0; i < found; ++ i) {
+
+                if (sq_dists[i] > max_sq_dist)
+                    continue;
+
+                const int idx = indices[i];
+                if (idx >= 0 && static_cast<size_t>(idx) < keyframes_.size()) {
+
+                    const auto &kf = keyframes_[idx];
+                    if (kf.cloud && !kf.cloud->empty())
+                        selected_keyframes.push_back(kf);
+                }
+            }
+        } else {
+
+            std::vector<std::pair<double, size_t>> dists;
+            dists.reserve(keyframes_.size());
+            for (size_t i = 0; i < keyframes_.size(); ++ i) {
+
+                const auto &kf = keyframes_[i];
+                if (!kf.pose.p.allFinite() || !kf.cloud || kf.cloud->empty())
+                    continue;
+
+                const double d = (kf.pose.p - query_state.pose.p).norm();
+                dists.emplace_back(d, i);
+            }
+
+            std::sort(dists.begin(), dists.end());
+            for (size_t i = 0;
+                i < std::min(dists.size(), static_cast<size_t>(knn_limit_));
+                ++ i) {
+
+                if (dists[i].first > max_distance_)
+                    break;
+                selected_keyframes.push_back(keyframes_[dists[i].second]);
+            }
+        }
+
+        RCLCPP_INFO_THROTTLE(
+            get_logger(), *get_clock(), log_throttle_ms_,
+            "Submap selected: mode=spatial_knn selected=%zu total=%zu knn=%d max_distance=%.3f",
+            selected_keyframes.size(),
+            keyframes_.size(),
+            knn_limit_,
+            max_distance_
+        );
+        return !selected_keyframes.empty();
     }
 
     /**
@@ -1054,6 +1340,15 @@ PROPAGATION:
         if (cloud->empty())
             return;
 
+        if (!filterInputExclusionBox(cloud)) {
+
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), log_throttle_ms_,
+                "Input cloud became empty after exclusion-box filtering"
+            );
+            return;
+        }
+
         // create a snapshot data
         FrameSnapshot snapshot;
         const rclcpp::Time stamp = msg->header.stamp;
@@ -1080,65 +1375,11 @@ PROPAGATION:
             snapshot.has_keyframes = !keyframes_.empty();
             snapshot.keyframes.clear();
 
-            if (snapshot.has_keyframes) {
-
-                if (keyframe_positions_ &&
-                    keyframe_kdtree_ &&
-                    !keyframe_positions_->empty() &&
-                    keyframe_positions_->size() == keyframes_.size() &&
-                    snapshot.submap_query_state.pose.p.allFinite() &&
-                    knn_limit_ > 0 &&
-                    max_distance_ > 0.0) {
-
-                    pcl::PointXYZ query;
-                    query.x = static_cast<float>(snapshot.submap_query_state.pose.p.x());
-                    query.y = static_cast<float>(snapshot.submap_query_state.pose.p.y());
-                    query.z = static_cast<float>(snapshot.submap_query_state.pose.p.z());
-
-                    const int k =
-                        std::min(knn_limit_, static_cast<int>(keyframes_.size()));
-                    std::vector<int> indices;
-                    std::vector<float> sq_dists;
-                    indices.reserve(k);
-                    sq_dists.reserve(k);
-
-                    const int found =
-                        keyframe_kdtree_->nearestKSearch(query, k, indices, sq_dists);
-                    const double max_sq_dist = max_distance_ * max_distance_;
-
-                    for (int i = 0; i < found; ++ i) {
-
-                        if (sq_dists[i] > max_sq_dist) continue;
-
-                        const int idx = indices[i];
-                        if (idx >= 0 && static_cast<size_t>(idx) < keyframes_.size())
-                            snapshot.keyframes.push_back(keyframes_[idx]);
-                    }
-                } else {
-
-                    std::vector<std::pair<double, size_t>> dists;
-                    dists.reserve(keyframes_.size());
-                    for (size_t i = 0; i < keyframes_.size(); ++ i) {
-
-                        const auto &kf = keyframes_[i];
-                        if (!kf.pose.p.allFinite() || !kf.cloud || kf.cloud->empty())
-                            continue;
-
-                        const double d =
-                            (kf.pose.p - snapshot.submap_query_state.pose.p).norm();
-                        dists.emplace_back(d, i);
-                    }
-
-                    std::sort(dists.begin(), dists.end());
-                    for (size_t i = 0;
-                        i < std::min(dists.size(), static_cast<size_t>(knn_limit_));
-                        ++ i) {
-
-                        if (dists[i].first > max_distance_) break;
-                        snapshot.keyframes.push_back(keyframes_[dists[i].second]);
-                    }
-                }
-            }
+            if (snapshot.has_keyframes)
+                selectSubmapKeyframes(
+                    snapshot.submap_query_state,
+                    snapshot.keyframes
+                );
         }
 
         std::sort(

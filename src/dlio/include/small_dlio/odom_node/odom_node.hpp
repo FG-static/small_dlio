@@ -9,6 +9,7 @@
 #include "rclcpp/time.hpp"
 
 #include <pcl/kdtree/kdtree_flann.h>
+#include <string>
 
 namespace small_dlio {
 
@@ -102,6 +103,24 @@ namespace small_dlio {
             const Eigen::Vector3d &calib_acc_avg,
             const Eigen::Vector3d &calib_gyro_avg
         );
+
+        bool filterInputExclusionBox(
+            pcl::PointCloud<PointXYZIT>::Ptr &cloud
+        ) const;
+
+        bool selectSubmapKeyframes(
+            const State &query_state,
+            std::vector<KeyFrame> &selected_keyframes
+        ) const;
+
+        bool selectSubmapKeyframesBySpatialKnn(
+            const State &query_state,
+            std::vector<KeyFrame> &selected_keyframes
+        ) const;
+
+        bool selectSubmapKeyframesByRecentWindow(
+            std::vector<KeyFrame> &selected_keyframes
+        ) const;
 
         // 分块核心函数
         bool motionCorrection(
@@ -211,6 +230,10 @@ namespace small_dlio {
         int knn_limit_ = 5;
         double max_distance_ = 20.0;
         int log_throttle_ms_ = 2000;
+        std::string submap_selection_mode_ = "recent_window";
+        int submap_window_keyframes_ = 20;
+        int submap_window_min_keyframes_ = 5;
+        double submap_window_max_travel_distance_ = -1.0;
 
         // GICP
         double gicp_leaf_size_ = 0.10;
@@ -240,6 +263,13 @@ namespace small_dlio {
         double kf_trans_thresh_ = 0.5;
         double kf_rot_thresh_ = 10.0 * M_PI / 180.0;
         double max_alignment_score_ = 1.0;
+        bool keyframe_exclusion_box_enable_ = false;
+        double keyframe_exclusion_min_x_ = -3.0;
+        double keyframe_exclusion_max_x_ = -0.2;
+        double keyframe_exclusion_min_y_ = -1.2;
+        double keyframe_exclusion_max_y_ = 1.2;
+        double keyframe_exclusion_min_z_ = -0.1;
+        double keyframe_exclusion_max_z_ = 2.0;
 
         Eigen::Vector3d gravity_ = {0, 0, 9.8};
     };

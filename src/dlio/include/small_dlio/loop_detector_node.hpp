@@ -50,6 +50,12 @@ namespace small_dlio {
             bool has_cart_descriptor = false;
         };
 
+        struct RetrievalHit {
+
+            const LoopKeyFrame *history = nullptr;
+            float distance = std::numeric_limits<float>::infinity();
+        };
+
         // Save potential loop-detection frame
         struct LoopCandidate {
 
@@ -98,6 +104,21 @@ namespace small_dlio {
             const sensor_msgs::msg::PointCloud2 &cloud
         );
 
+        std::vector<RetrievalHit> retrieveByCartKey(
+            const LoopKeyFrame &current,
+            int &eligible_count
+        ) const;
+
+        float retrievalKeyDistance(
+            const Eigen::VectorXf &a,
+            const Eigen::VectorXf &b
+        ) const;
+
+        float retrievalKeyReverseDistance(
+            const Eigen::VectorXf &a,
+            const Eigen::VectorXf &b
+        ) const;
+
         bool computeIrisDescriptor(
             LoopKeyFrame &keyframe
         );
@@ -115,6 +136,7 @@ namespace small_dlio {
             const LoopKeyFrame &current,
             LoopCandidate &candidate,
             float &best_distance,
+            float &best_cart_distance,
             int &eligible_count
         ) const;
 
@@ -122,6 +144,7 @@ namespace small_dlio {
             const LoopKeyFrame &current,
             std::vector<LoopCandidate> &candidates,
             float &best_distance,
+            float &best_cart_distance,
             int &eligible_count
         ) const;
 
@@ -285,6 +308,10 @@ namespace small_dlio {
         bool pgo_loop_robust_kernel_enable_ = true;
         double pgo_loop_robust_kernel_delta_ = 1.0;
 
+        bool lcd_retrieval_enable_ = false;
+        int lcd_retrieval_top_k_ = 150;
+        double lcd_retrieval_max_distance_ = -1.0;
+
         int iris_nscale_ = 4;
         int iris_min_wave_length_ = 18;
         float iris_mult_ = 1.6F;
@@ -316,7 +343,6 @@ namespace small_dlio {
         uint32_t last_added_loop_current_id_ = 0;
         double last_added_loop_current_travel_distance_ = 0.0;
         bool has_last_added_loop_edge_ = false;
-        uint32_t next_backend_keyframe_id_ = 0;
     };
 
 } // namespace small_dlio

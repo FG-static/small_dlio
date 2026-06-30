@@ -57,6 +57,10 @@ namespace small_dlio {
             const pcl::PointCloud<pcl::PointXYZ> &cloud
         ) const;
 
+        Descriptor flipped180(
+            const Descriptor &descriptor
+        ) const;
+
         MatchResult compare(
             const Descriptor &current,
             const Descriptor &history
