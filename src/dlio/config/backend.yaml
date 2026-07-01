@@ -37,16 +37,16 @@ small_dlio_loop_detector:
     keyframe_exclusion_max_y: 1.2
     keyframe_exclusion_min_z: -0.1
     keyframe_exclusion_max_z: 2.0
-    kf_trans_thresh: 0.5
-    kf_rot_thresh: 0.1745
+    kf_trans_thresh: 1.0
+    kf_rot_thresh: 0.3
     min_kf_interval_sec: 0.0
     min_cloud_points: 10
     loop_enable: true
     loop_min_keyframe_gap: 0
     loop_min_travel_distance: 8.0
-    loop_iris_distance_thresh: 0.45
+    loop_iris_distance_thresh: 0.45 # IRIS DIST GATE
     loop_gicp_enable: true
-    loop_gicp_score_thresh: 0.5
+    loop_gicp_score_thresh: 0.5 # GICP SCORE GATE
     loop_gicp_max_correction_trans: 2.5
     loop_gicp_max_correction_rot_deg: 25.0
     loop_gicp_selection_correction_trans_weight: 0.1
@@ -62,8 +62,8 @@ small_dlio_loop_detector:
     pgo_max_iterations: 20
     pgo_odom_edge_weight: 150.0
     pgo_loop_edge_weight: 850.0
-    loop_edge_min_current_gap: 15 # 帧
-    loop_edge_min_travel_gap: 4.0 # 里程计距离
+    loop_edge_min_current_gap: 0 # 帧
+    loop_edge_min_travel_gap: 0.0 # 里程计距离
     # Information matrix diagonal order: [x, y, z, roll, pitch, yaw].
     # Higher value means stronger trust in that DoF.
     pgo_odom_info_diag: [350.0, 350.0, 150.0, 140.0, 140.0, 400.0]
@@ -94,7 +94,7 @@ small_dlio_loop_detector:
     cart_align_search_ratio: 0.04
     cart_candidate_top_k: 10
     loop_descriptor_verify_top_k: 5
-    cart_distance_thresh: 0.55
+    cart_distance_thresh: 0.55 # CART DIST GATE
 
 fastlio_keyframe_bridge:
   ros__parameters:
