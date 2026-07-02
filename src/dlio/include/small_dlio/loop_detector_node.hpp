@@ -11,6 +11,7 @@
 #include "nav_msgs/msg/path.hpp"
 #include "pose_graph.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "sensor_msgs/msg/imu.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 #include "dlio/msg/optimized_key_frames.hpp"
@@ -22,6 +23,7 @@
 
 #include <memory>
 #include <limits>
+#include <mutex>
 #include <rclcpp/publisher.hpp>
 #include <string>
 #include <utility>
@@ -42,8 +44,10 @@ namespace small_dlio {
             uint32_t id = 0;
             rclcpp::Time stamp;
             double travel_distance = 0.0;
+            geometry_msgs::msg::Pose raw_pose;
             geometry_msgs::msg::Pose pose;
             pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
+            pcl::PointCloud<pcl::PointXYZ>::Ptr descriptor_cloud;
             cv::Mat1b iris_image;
             LidarIris::FeatureDesc iris_descriptor;
             CartContext::Descriptor cart_descriptor;
@@ -80,6 +84,10 @@ namespace small_dlio {
 
         void callbackKeyFrame(
             const dlio::msg::KeyFrame::SharedPtr msg
+        );
+
+        void callbackImu(
+            const sensor_msgs::msg::Imu::SharedPtr msg
         );
 
         bool convertKeyFrameMsg(
@@ -126,6 +134,35 @@ namespace small_dlio {
         bool computeCartDescriptor(
             LoopKeyFrame &keyframe
         ) const;
+
+        bool gravityAlignmentReady() const;
+
+        Eigen::Isometry3d gravityAlignmentTransform() const;
+
+        void configureManualGravityAlignment();
+
+        bool finalizeGravityAlignmentFromAcceleration(
+            const Eigen::Vector3d &acc_mean,
+            size_t sample_count,
+            double sample_span_sec,
+            const char *source
+        );
+
+        Eigen::Isometry3d alignedPose(
+            const geometry_msgs::msg::Pose &raw_pose
+        ) const;
+
+        pcl::PointCloud<pcl::PointXYZ>::Ptr makeDescriptorCloud(
+            const LoopKeyFrame &keyframe
+        ) const;
+
+        static Eigen::Matrix3d rotationFromRpyDeg(
+            const std::vector<double> &rpy_deg
+        );
+
+        static Eigen::Vector3d rpyDegFromRotation(
+            const Eigen::Matrix3d &R
+        );
 
         bool detectLoopCandidate(
             const LoopKeyFrame &current,
@@ -232,6 +269,7 @@ namespace small_dlio {
         ) const;
 
         rclcpp::Subscription<dlio::msg::KeyFrame>::SharedPtr sub_keyframe_;
+        rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
         rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
             pub_loop_markers_;
         rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr
@@ -283,6 +321,25 @@ namespace small_dlio {
         std::string lidar_frame_ = "livox_frame";
         Eigen::Isometry3d T_body_lidar_ = Eigen::Isometry3d::Identity();
         Eigen::Isometry3d T_lidar_body_ = Eigen::Isometry3d::Identity();
+
+        bool gravity_align_enable_ = false;
+        std::string gravity_align_source_ = "imu_average";
+        std::string gravity_align_imu_topic_ = "/livox/imu";
+        double gravity_align_sample_sec_ = 5.0;
+        double gravity_align_acc_scale_ = 9.80665;
+        std::vector<double> gravity_align_manual_rpy_deg_ = {0.0, 0.0, 0.0};
+        bool gravity_align_apply_to_descriptor_ = true;
+        bool gravity_align_apply_to_pgo_ = true;
+        bool gravity_align_apply_to_map_ = true;
+        mutable std::mutex gravity_align_mutex_;
+        Eigen::Isometry3d T_gravity_align_ = Eigen::Isometry3d::Identity();
+        Eigen::Vector3d gravity_align_acc_mean_ = Eigen::Vector3d::Zero();
+        size_t gravity_align_sample_count_ = 0;
+        double gravity_align_first_stamp_ = 0.0;
+        double gravity_align_latest_stamp_ = 0.0;
+        bool gravity_align_ready_ = false;
+        bool gravity_align_started_ = false;
+
         bool keyframe_exclusion_box_enable_ = false;
         double keyframe_exclusion_min_x_ = -3.0;
         double keyframe_exclusion_max_x_ = -0.2;

@@ -10,9 +10,11 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cctype>
 #include <limits>
 #include <pcl/common/transforms.h>
 #include <pcl/filters/voxel_grid.h>
+#include <rclcpp/qos.hpp>
 #include <sstream>
 #include <rclcpp/qos_overriding_options.hpp>
 #include <utility>
@@ -71,6 +73,19 @@ namespace small_dlio {
             pgo_odom_edge_weight_,
             pgo_loop_edge_weight_
         });
+
+        if (gravity_align_enable_ &&
+            gravity_align_source_ == "imu_average") {
+
+            sub_imu_ =
+                create_subscription<sensor_msgs::msg::Imu>(
+                    gravity_align_imu_topic_,
+                    rclcpp::SensorDataQoS(),
+                    [this](sensor_msgs::msg::Imu::SharedPtr msg) {
+                        callbackImu(msg);
+                    }
+                );
+        }
 
         sub_keyframe_ =
             create_subscription<dlio::msg::KeyFrame>(
@@ -132,6 +147,19 @@ namespace small_dlio {
             filtered_keyframe_topic_.empty() ? "<disabled>" :
                 filtered_keyframe_topic_.c_str()
         );
+        RCLCPP_INFO(
+            get_logger(),
+            "Gravity align: enabled=%d source=%s imu_topic=%s sample_sec=%.3f "
+            "apply_descriptor=%d apply_pgo=%d apply_map=%d ready=%d",
+            gravity_align_enable_ ? 1 : 0,
+            gravity_align_source_.c_str(),
+            gravity_align_imu_topic_.c_str(),
+            gravity_align_sample_sec_,
+            gravity_align_apply_to_descriptor_ ? 1 : 0,
+            gravity_align_apply_to_pgo_ ? 1 : 0,
+            gravity_align_apply_to_map_ ? 1 : 0,
+            gravityAlignmentReady() ? 1 : 0
+        );
     }
 
     void LoopDetectorNode::loadParams() {
@@ -176,6 +204,21 @@ namespace small_dlio {
             loop_gicp_max_correspondence_distance_);
         declare_parameter("body_frame", body_frame_);
         declare_parameter("lidar_frame", lidar_frame_);
+        declare_parameter("gravity_align_enable", gravity_align_enable_);
+        declare_parameter("gravity_align_source", gravity_align_source_);
+        declare_parameter("gravity_align_imu_topic", gravity_align_imu_topic_);
+        declare_parameter("gravity_align_sample_sec", gravity_align_sample_sec_);
+        declare_parameter("gravity_align_acc_scale", gravity_align_acc_scale_);
+        declare_parameter(
+            "gravity_align_manual_rpy_deg",
+            gravity_align_manual_rpy_deg_
+        );
+        declare_parameter(
+            "gravity_align_apply_to_descriptor",
+            gravity_align_apply_to_descriptor_
+        );
+        declare_parameter("gravity_align_apply_to_pgo", gravity_align_apply_to_pgo_);
+        declare_parameter("gravity_align_apply_to_map", gravity_align_apply_to_map_);
         declare_parameter("keyframe_exclusion_box_enable", keyframe_exclusion_box_enable_);
         declare_parameter("keyframe_exclusion_min_x", keyframe_exclusion_min_x_);
         declare_parameter("keyframe_exclusion_max_x", keyframe_exclusion_max_x_);
@@ -271,6 +314,21 @@ namespace small_dlio {
             loop_gicp_max_correspondence_distance_);
         get_parameter("body_frame", body_frame_);
         get_parameter("lidar_frame", lidar_frame_);
+        get_parameter("gravity_align_enable", gravity_align_enable_);
+        get_parameter("gravity_align_source", gravity_align_source_);
+        get_parameter("gravity_align_imu_topic", gravity_align_imu_topic_);
+        get_parameter("gravity_align_sample_sec", gravity_align_sample_sec_);
+        get_parameter("gravity_align_acc_scale", gravity_align_acc_scale_);
+        get_parameter(
+            "gravity_align_manual_rpy_deg",
+            gravity_align_manual_rpy_deg_
+        );
+        get_parameter(
+            "gravity_align_apply_to_descriptor",
+            gravity_align_apply_to_descriptor_
+        );
+        get_parameter("gravity_align_apply_to_pgo", gravity_align_apply_to_pgo_);
+        get_parameter("gravity_align_apply_to_map", gravity_align_apply_to_map_);
         get_parameter("keyframe_exclusion_box_enable", keyframe_exclusion_box_enable_);
         get_parameter("keyframe_exclusion_min_x", keyframe_exclusion_min_x_);
         get_parameter("keyframe_exclusion_max_x", keyframe_exclusion_max_x_);
@@ -376,6 +434,44 @@ namespace small_dlio {
         if (!std::isfinite(cart_distance_thresh_) ||
             cart_distance_thresh_ <= 0.0)
             cart_distance_thresh_ = std::numeric_limits<double>::infinity();
+        // 对一定容器范围内元素调用特定函数
+        std::transform(
+            gravity_align_source_.begin(),
+            gravity_align_source_.end(),
+            gravity_align_source_.begin(),
+            [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            }
+        );
+        if (gravity_align_source_ != "imu_average" &&
+            gravity_align_source_ != "manual_rpy") {
+
+            RCLCPP_WARN(
+                get_logger(),
+                "gravity_align_source must be imu_average or manual_rpy, got '%s'; using imu_average",
+                gravity_align_source_.c_str()
+            );
+            gravity_align_source_ = "imu_average";
+        }
+        if (!std::isfinite(gravity_align_sample_sec_) ||
+            gravity_align_sample_sec_ <= 0.0)
+            gravity_align_sample_sec_ = 5.0;
+        if (!std::isfinite(gravity_align_acc_scale_) ||
+            gravity_align_acc_scale_ <= 0.0)
+            gravity_align_acc_scale_ = 1.0;
+        if (gravity_align_manual_rpy_deg_.size() != 3) {
+
+            RCLCPP_WARN(
+                get_logger(),
+                "gravity_align_manual_rpy_deg must contain [roll,pitch,yaw] degrees; using zero"
+            );
+            gravity_align_manual_rpy_deg_ = {0.0, 0.0, 0.0};
+        }
+        if (gravity_align_apply_to_pgo_)
+            gravity_align_apply_to_map_ = true;
+        if (gravity_align_enable_ &&
+            gravity_align_source_ == "manual_rpy")
+            configureManualGravityAlignment();
         if (loop_edge_min_current_gap_ < 0)
             loop_edge_min_current_gap_ = 0;
         if (!std::isfinite(loop_edge_min_travel_gap_) ||
@@ -621,6 +717,35 @@ namespace small_dlio {
         dlio::msg::KeyFrame accepted_msg = *msg;
         const rclcpp::Time timing_stamp(accepted_msg.header.stamp);
 
+        if (gravity_align_enable_ &&
+            (gravity_align_apply_to_descriptor_ ||
+             gravity_align_apply_to_pgo_ ||
+             gravity_align_apply_to_map_) &&
+            !gravityAlignmentReady()) {
+
+            size_t align_samples = 0;
+            double align_span = 0.0;
+            {
+                std::lock_guard<std::mutex> lock(gravity_align_mutex_);
+                align_samples = gravity_align_sample_count_;
+                align_span = std::max(
+                    0.0,
+                    gravity_align_latest_stamp_ - gravity_align_first_stamp_
+                );
+            }
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "Waiting for gravity alignment before accepting keyframes: id=%u "
+                "source=%s samples=%zu span=%.3f/%.3f sec",
+                accepted_msg.id,
+                gravity_align_source_.c_str(),
+                align_samples,
+                align_span,
+                gravity_align_sample_sec_
+            );
+            return;
+        }
+
         // 2. 可选地裁掉指定空间盒内的点，再转换成后端内部 LoopKeyFrame。
         if (!filterKeyFrameMsgCloud(accepted_msg)) {
 
@@ -642,6 +767,9 @@ namespace small_dlio {
             );
             return;
         }
+
+        if (gravity_align_enable_ && gravity_align_apply_to_map_)
+            accepted_msg.pose = keyframe.pose;
 
         // 3. 为当前关键帧计算 LiDAR-Iris 和 Cart Context。描述子失败时，
         // 当前帧不会进入回环库，也不会作为 PGO 节点。
@@ -1068,6 +1196,299 @@ namespace small_dlio {
         return true;
     }
 
+    /**
+     * @brief IMU 数据回调函数
+     * @param msg imu 数据消息
+     * @return void
+     *
+     * 主要用于 LCD 时对齐重力
+     */
+    void LoopDetectorNode::callbackImu(
+        const sensor_msgs::msg::Imu::SharedPtr msg
+    ) {
+
+        if (!msg || !gravity_align_enable_ ||
+            gravity_align_source_ != "imu_average")
+            return;
+
+        const Eigen::Vector3d acc(
+            msg->linear_acceleration.x,
+            msg->linear_acceleration.y,
+            msg->linear_acceleration.z
+        );
+        if (!acc.allFinite() || acc.norm() < 1e-9)
+            return;
+
+        double stamp =
+            msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
+        if (!std::isfinite(stamp) || stamp <= 0.0)
+            stamp = now().seconds();
+
+        Eigen::Vector3d acc_mean = Eigen::Vector3d::Zero();
+        size_t sample_count = 0;
+        double sample_span = 0.0;
+        bool should_finalize = false;
+        {
+            std::lock_guard<std::mutex> lock(gravity_align_mutex_);
+            if (gravity_align_ready_)
+                return;
+            if (!gravity_align_started_) {
+
+                gravity_align_started_ = true;
+                gravity_align_first_stamp_ = stamp;
+                gravity_align_latest_stamp_ = stamp;
+                gravity_align_acc_mean_.setZero();
+                gravity_align_sample_count_ = 0;
+                RCLCPP_INFO(
+                    get_logger(),
+                    "Gravity alignment IMU averaging started: topic=%s sample_sec=%.3f",
+                    gravity_align_imu_topic_.c_str(),
+                    gravity_align_sample_sec_
+                );
+            }
+
+            ++ gravity_align_sample_count_;
+            gravity_align_latest_stamp_ = stamp;
+            gravity_align_acc_mean_ +=
+                (acc - gravity_align_acc_mean_) /
+                static_cast<double>(gravity_align_sample_count_);
+            sample_count = gravity_align_sample_count_;
+            acc_mean = gravity_align_acc_mean_;
+            sample_span = std::max(
+                0.0,
+                gravity_align_latest_stamp_ - gravity_align_first_stamp_
+            );
+            should_finalize = sample_span >= gravity_align_sample_sec_;
+        }
+
+        if (should_finalize) {
+
+            finalizeGravityAlignmentFromAcceleration(
+                acc_mean,
+                sample_count,
+                sample_span,
+                "imu_average"
+            );
+        }
+    }
+
+    bool LoopDetectorNode::gravityAlignmentReady() const {
+
+        if (!gravity_align_enable_)
+            return true;
+        std::lock_guard<std::mutex> lock(gravity_align_mutex_);
+        return gravity_align_ready_;
+    }
+
+    // 对齐变换
+    Eigen::Isometry3d LoopDetectorNode::gravityAlignmentTransform() const {
+
+        std::lock_guard<std::mutex> lock(gravity_align_mutex_);
+        return T_gravity_align_;
+    }
+
+    // 根据标准值对齐重力
+    void LoopDetectorNode::configureManualGravityAlignment() {
+
+        const Eigen::Matrix3d R_align =
+            rotationFromRpyDeg(gravity_align_manual_rpy_deg_);
+        if (!R_align.allFinite()) {
+
+            RCLCPP_WARN(
+                get_logger(),
+                "gravity_align_manual_rpy_deg is invalid; disabling gravity alignment"
+            );
+            gravity_align_enable_ = false;
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(gravity_align_mutex_);
+            T_gravity_align_ = Eigen::Isometry3d::Identity();
+            T_gravity_align_.linear() = R_align;
+            gravity_align_ready_ = true;
+        }
+
+        const Eigen::Vector3d rpy = rpyDegFromRotation(R_align);
+        RCLCPP_INFO(
+            get_logger(),
+            "Gravity alignment manual_rpy ready: rpy_deg=[%.3f %.3f %.3f]",
+            rpy.x(), rpy.y(), rpy.z()
+        );
+    }
+
+    /**
+     * @brief 使用初始累计平均值做重力对齐变换
+     * @param acc_mean 加速度累计平均值
+     * @param sample_count 采样数量
+     * @param sample_span_sec 采样持续时间
+     * @param source 模式
+     * @return bool 是否成功
+     */
+    bool LoopDetectorNode::finalizeGravityAlignmentFromAcceleration(
+        const Eigen::Vector3d &acc_mean,
+        const size_t sample_count,
+        const double sample_span_sec,
+        const char *source
+    ) {
+
+        const double acc_norm = acc_mean.norm();
+        if (!acc_mean.allFinite() || acc_norm < 1e-9) {
+
+            RCLCPP_WARN(
+                get_logger(),
+                "Gravity alignment failed: invalid acc_mean=[%.6f %.6f %.6f]",
+                acc_mean.x(), acc_mean.y(), acc_mean.z()
+            );
+            return false;
+        }
+
+        const Eigen::Vector3d measured = acc_mean / acc_norm;
+        const Eigen::Vector3d target = Eigen::Vector3d::UnitZ();
+        const Eigen::Vector3d axis = measured.cross(target);
+        const double axis_norm = axis.norm();
+        const double cos_angle =
+            std::clamp(measured.dot(target), -1.0, 1.0);
+        Eigen::Matrix3d R_align = Eigen::Matrix3d::Identity();
+        if (axis_norm < 1e-9) {
+
+            if (cos_angle < 0.0) {
+
+                R_align = Eigen::AngleAxisd(
+                    M_PI,
+                    Eigen::Vector3d::UnitX()
+                ).toRotationMatrix();
+            }
+        } else {
+
+            const Eigen::Matrix3d K =
+                (Eigen::Matrix3d() <<
+                    0.0, -axis.z(), axis.y(),
+                    axis.z(), 0.0, -axis.x(),
+                    -axis.y(), axis.x(), 0.0
+                ).finished();
+            R_align = Eigen::Matrix3d::Identity() +
+                K +
+                K * K * ((1.0 - cos_angle) / (axis_norm * axis_norm));
+        }
+        const Eigen::Vector3d rpy = rpyDegFromRotation(R_align);
+        const double tilt_deg = std::acos(cos_angle) * 180.0 / M_PI;
+
+        {
+            std::lock_guard<std::mutex> lock(gravity_align_mutex_);
+            if (gravity_align_ready_)
+                return true;
+            T_gravity_align_ = Eigen::Isometry3d::Identity();
+            T_gravity_align_.linear() = R_align;
+            gravity_align_ready_ = true;
+        }
+
+        RCLCPP_INFO(
+            get_logger(),
+            "Gravity alignment ready: source=%s samples=%zu span=%.3f "
+            "acc_mean_raw=[%.6f %.6f %.6f] acc_norm_raw=%.6f "
+            "acc_norm_scaled=%.6f tilt_deg=%.3f align_rpy_deg=[%.3f %.3f %.3f]",
+            source ? source : "unknown",
+            sample_count,
+            sample_span_sec,
+            acc_mean.x(), acc_mean.y(), acc_mean.z(),
+            acc_norm,
+            acc_norm * gravity_align_acc_scale_,
+            tilt_deg,
+            rpy.x(), rpy.y(), rpy.z()
+        );
+        return true;
+    }
+
+    // 对齐位姿
+    Eigen::Isometry3d LoopDetectorNode::alignedPose(
+        const geometry_msgs::msg::Pose &raw_pose
+    ) const {
+
+        const Eigen::Isometry3d raw = poseToIsometry(raw_pose);
+        if (!gravity_align_enable_ || !raw.matrix().allFinite())
+            return raw;
+        return gravityAlignmentTransform() * raw;
+    }
+
+    // 将 Keyframe 的点云也进行重力对齐
+    pcl::PointCloud<pcl::PointXYZ>::Ptr LoopDetectorNode::makeDescriptorCloud(
+        const LoopKeyFrame &keyframe
+    ) const {
+
+        if (!keyframe.cloud || keyframe.cloud->empty())
+            return keyframe.cloud;
+        if (!gravity_align_enable_ ||
+            !gravity_align_apply_to_descriptor_ ||
+            !gravityAlignmentReady())
+            return keyframe.cloud;
+
+        const Eigen::Isometry3d T_aligned_world_body =
+            alignedPose(keyframe.raw_pose);
+        if (!T_aligned_world_body.matrix().allFinite())
+            return keyframe.cloud;
+
+        Eigen::Matrix4d R_descriptor = Eigen::Matrix4d::Identity();
+        R_descriptor.block<3, 3>(0, 0) =
+            T_aligned_world_body.rotation() *
+            T_body_lidar_.rotation();
+
+        auto cloud_aligned = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        pcl::transformPointCloud(
+            *keyframe.cloud,
+            *cloud_aligned,
+            R_descriptor.cast<float>()
+        );
+        cloud_aligned->width = static_cast<uint32_t>(cloud_aligned->size());
+        cloud_aligned->height = 1;
+        cloud_aligned->is_dense = false;
+        return cloud_aligned;
+    }
+
+    Eigen::Matrix3d LoopDetectorNode::rotationFromRpyDeg(
+        const std::vector<double> &rpy_deg
+    ) {
+
+        if (rpy_deg.size() != 3)
+            return Eigen::Matrix3d::Identity();
+        const double roll = rpy_deg[0] * M_PI / 180.0;
+        const double pitch = rpy_deg[1] * M_PI / 180.0;
+        const double yaw = rpy_deg[2] * M_PI / 180.0;
+        return (
+            Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()) *
+            Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) *
+            Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX())
+        ).toRotationMatrix();
+    }
+
+    Eigen::Vector3d LoopDetectorNode::rpyDegFromRotation(
+        const Eigen::Matrix3d &R
+    ) {
+
+        const double sy =
+            std::sqrt(R(0, 0) * R(0, 0) + R(1, 0) * R(1, 0));
+        const bool singular = sy < 1e-6;
+        double roll = 0.0;
+        double pitch = 0.0;
+        double yaw = 0.0;
+        if (!singular) {
+
+            roll = std::atan2(R(2, 1), R(2, 2));
+            pitch = std::atan2(-R(2, 0), sy);
+            yaw = std::atan2(R(1, 0), R(0, 0));
+        } else {
+
+            roll = std::atan2(-R(1, 2), R(1, 1));
+            pitch = std::atan2(-R(2, 0), sy);
+            yaw = 0.0;
+        }
+        return Eigen::Vector3d(
+            roll * 180.0 / M_PI,
+            pitch * 180.0 / M_PI,
+            yaw * 180.0 / M_PI
+        );
+    }
+
     bool LoopDetectorNode::convertKeyFrameMsg(
         const dlio::msg::KeyFrame &msg,
         LoopKeyFrame &keyframe
@@ -1105,8 +1526,13 @@ namespace small_dlio {
 
         keyframe.id = msg.id;
         keyframe.stamp = rclcpp::Time(msg.header.stamp);
-        keyframe.pose = msg.pose;
+        keyframe.raw_pose = msg.pose;
+        keyframe.pose = gravity_align_enable_ &&
+            (gravity_align_apply_to_pgo_ || gravity_align_apply_to_map_)
+                ? isometryToPose(alignedPose(msg.pose))
+                : msg.pose;
         keyframe.cloud = cloud_lidar;
+        keyframe.descriptor_cloud = makeDescriptorCloud(keyframe);
         return true;
     }
 
@@ -1190,10 +1616,13 @@ namespace small_dlio {
         LoopKeyFrame &keyframe
     ) {
 
-        if (!lidar_iris_ || !keyframe.cloud || keyframe.cloud->empty())
+        const auto &cloud = keyframe.descriptor_cloud
+            ? keyframe.descriptor_cloud
+            : keyframe.cloud;
+        if (!lidar_iris_ || !cloud || cloud->empty())
             return false;
 
-        keyframe.iris_image = LidarIris::GetIris(*keyframe.cloud);
+        keyframe.iris_image = LidarIris::GetIris(*cloud);
         if (keyframe.iris_image.empty())
             return false;
 
@@ -1210,11 +1639,14 @@ namespace small_dlio {
         keyframe.has_cart_descriptor = false;
         if (!cart_enable_)
             return true;
-        if (!cart_context_ || !keyframe.cloud || keyframe.cloud->empty())
+        const auto &cloud = keyframe.descriptor_cloud
+            ? keyframe.descriptor_cloud
+            : keyframe.cloud;
+        if (!cart_context_ || !cloud || cloud->empty())
             return false;
 
         keyframe.cart_descriptor =
-            cart_context_->makeDescriptor(*keyframe.cloud);
+            cart_context_->makeDescriptor(*cloud);
         const bool valid =
             keyframe.cart_descriptor.image.rows() == cart_context_->numX() &&
             keyframe.cart_descriptor.image.cols() == cart_context_->numY() &&
